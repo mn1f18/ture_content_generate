@@ -14,6 +14,7 @@
    - `deduplication_agent.py` - 去重处理主逻辑，调用阿里智能体进行去重分析
    - `app.py` - 提供REST API接口，方便与其他系统集成
    - `timer_monitor.py` - 时间窗口监控程序，实现智能倒计时处理
+   - `curl_monitor.py` - 基于curl的监控程序，使用API接口进行处理
    - `create_pg_true_content_prepare.py` - 创建PostgreSQL表结构脚本
 
 ## 系统流程
@@ -62,7 +63,7 @@ python create_pg_true_content_prepare.py
 
 ## 使用方法
 
-系统提供三种使用方式，可以根据不同场景选择适合的方式。
+系统提供四种使用方式，可以根据不同场景选择适合的方式。
 
 ### 1. API服务
 
@@ -129,7 +130,25 @@ python timer_monitor.py --timeout 10
 3. 在倒计时期间，如果又检测到新数据，则重置倒计时
 4. 倒计时结束后，执行去重处理
 
-这种方式非常适合于数据持续更新的场景，可以避免频繁处理，等待数据更新相对稳定后再一次性处理，提高效率。
+### 4. 基于curl的监控模式（新功能）
+
+结合API服务和监控功能，提供更灵活的部署方式：
+
+```bash
+python curl_monitor.py --timeout 10 --api-url http://localhost:5001
+```
+
+参数说明：
+- `--timeout`：设置倒计时窗口时间，单位为分钟，默认为10分钟
+- `--api-url`：API服务的URL，默认为http://localhost:5001
+
+工作原理：
+1. 监控MySQL数据库中的最新workflow_id和更新时间
+2. 当检测到新数据或数据更新时，开始/重置倒计时
+3. 倒计时结束后，使用curl命令调用API服务进行处理
+4. 完全依赖API服务，便于分布式部署
+
+这种方式特别适合在API服务与监控程序分开部署的场景，只需API服务能访问数据库，监控程序只需要能访问API服务即可。
 
 ## 智能体说明
 
@@ -163,5 +182,5 @@ python timer_monitor.py --timeout 10
 ## 故障排除
 
 * 如果遇到数据库连接问题，请检查`.env`文件中的连接配置
-* 日志文件（`deduplication.log`、`api.log`和`timer_monitor.log`）记录了详细的运行信息，可用于排查问题
+* 日志文件（`deduplication.log`、`api.log`、`timer_monitor.log`和`curl_monitor.log`）记录了详细的运行信息，可用于排查问题
 * 确保已正确配置阿里智能体的应用ID和API密钥 
