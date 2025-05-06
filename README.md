@@ -12,9 +12,7 @@
 
 2. **核心组件**：
    - `deduplication_agent.py` - 去重处理主逻辑，调用阿里智能体进行去重分析
-   - `app.py` - 提供REST API接口，方便与其他系统集成
-   - `timer_monitor.py` - 时间窗口监控程序，实现智能倒计时处理
-   - `curl_monitor.py` - 基于curl的监控程序，使用API接口进行处理
+   - `simple_api.py` - 提供简单直观的API接口，支持直接curl调用
    - `create_pg_true_content_prepare.py` - 创建PostgreSQL表结构脚本
 
 ## 系统流程
@@ -63,92 +61,53 @@ python create_pg_true_content_prepare.py
 
 ## 使用方法
 
-系统提供四种使用方式，可以根据不同场景选择适合的方式。
+系统提供简单直观的API接口，可以通过curl命令直接调用。
 
-### 1. API服务
-
-启动API服务：
+### 1. 启动API服务
 
 ```bash
-python app.py
+python simple_api.py
 ```
 
 这将启动一个HTTP服务，默认监听在`http://localhost:5001`。
 
-通过curl命令调用API：
+### 2. 通过curl命令调用API
 
-**获取最近的workflow列表**
-
+#### 检查API状态
 ```bash
-# 获取最近10个workflow
-curl http://localhost:5001/api/workflows
-
-# 获取最近5个workflow
-curl http://localhost:5001/api/workflows?limit=5
+curl http://localhost:5001/api/status
 ```
 
-**处理指定workflow**
-
+#### 获取最新的workflow信息
 ```bash
-# 处理指定的workflow_id
-curl -X POST http://localhost:5001/api/process \
-  -H "Content-Type: application/json" \
-  -d '{"workflow_id": "your_workflow_id"}'
-
-# 处理最新的workflow
-curl -X POST http://localhost:5001/api/process \
-  -H "Content-Type: application/json" \
-  -d '{}'
+curl http://localhost:5001/api/workflows/latest
 ```
 
-### 2. 直接使用去重脚本
-
-用于单次处理或测试：
-
+#### 处理最新的workflow
 ```bash
-# 处理最新的workflow
-python deduplication_agent.py
-
-# 处理指定的workflow_id
-python deduplication_agent.py --workflow_id your_workflow_id
+curl -X POST http://localhost:5001/api/process/latest
 ```
 
-### 3. 时间窗口监控模式
-
-适用于需要持续监控数据更新的场景：
-
+#### 处理指定的workflow
 ```bash
-python timer_monitor.py --timeout 10
+curl -X POST http://localhost:5001/api/process/your_workflow_id
 ```
 
-参数说明：
-- `--timeout`：设置倒计时窗口时间，单位为分钟，默认为10分钟
+## 自动化使用
 
-监控工作原理：
-1. 定期检查MySQL数据库中的最新workflow_id
-2. 当检测到新的workflow_id时，开始倒计时
-3. 在倒计时期间，如果又检测到新数据，则重置倒计时
-4. 倒计时结束后，执行去重处理
+如果需要定时自动处理，可以使用系统的计划任务工具：
 
-### 4. 基于curl的监控模式（新功能）
-
-结合API服务和监控功能，提供更灵活的部署方式：
-
+### Linux/Unix (Cron)
 ```bash
-python curl_monitor.py --timeout 10 --api-url http://localhost:5001
+# 每隔10分钟检查并处理最新的workflow
+*/10 * * * * curl -X POST http://localhost:5001/api/process/latest
 ```
 
-参数说明：
-- `--timeout`：设置倒计时窗口时间，单位为分钟，默认为10分钟
-- `--api-url`：API服务的URL，默认为http://localhost:5001
-
-工作原理：
-1. 监控MySQL数据库中的最新workflow_id和更新时间
-2. 当检测到新数据或数据更新时，开始/重置倒计时
-3. 倒计时结束后，使用curl命令调用API服务进行处理
-4. 完全依赖API服务，便于分布式部署
-
-这种方式特别适合在API服务与监控程序分开部署的场景，只需API服务能访问数据库，监控程序只需要能访问API服务即可。
+### Windows (计划任务)
+可以创建一个批处理文件 (.bat) 并设置为计划任务：
+```
+curl -X POST http://localhost:5001/api/process/latest
+```
 
 ## 智能体说明
 
@@ -176,11 +135,10 @@ python curl_monitor.py --timeout 10 --api-url http://localhost:5001
 ## 性能与优化
 
 * 系统默认只处理重要性为"高"或"中"的新闻，以减少处理量
-* 使用时间窗口模式可以有效避免频繁处理小批量数据
 * 系统会自动跳过已处理过的workflow，避免重复分析
 
 ## 故障排除
 
 * 如果遇到数据库连接问题，请检查`.env`文件中的连接配置
-* 日志文件（`deduplication.log`、`api.log`、`timer_monitor.log`和`curl_monitor.log`）记录了详细的运行信息，可用于排查问题
+* 日志文件（`deduplication.log`和`simple_api.log`）记录了详细的运行信息，可用于排查问题
 * 确保已正确配置阿里智能体的应用ID和API密钥 
