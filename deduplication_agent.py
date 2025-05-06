@@ -115,9 +115,9 @@ def extract_json_from_text(text):
 
 def call_ali_agent(news_data):
     """调用阿里智能体进行去重分析"""
-    if not DASHSCOPE_API_KEY:
-        logger.warning("未配置阿里智能体API密钥，使用模拟数据")
-        return mock_deduplication_result(news_data)
+    if not DASHSCOPE_API_KEY or not ALI_AGENT_APP_ID:
+        logger.error("阿里智能体API密钥或应用ID未配置，无法进行去重处理")
+        return None
     
     # 准备输入数据
     news_list = []
@@ -157,53 +157,6 @@ def call_ali_agent(news_data):
     except Exception as e:
         logger.error(f"调用阿里智能体时出错: {str(e)}")
         return None
-
-def mock_deduplication_result(news_data):
-    """生成模拟的去重结果（仅在没有API密钥时使用）"""
-    if len(news_data) <= 1:
-        return {
-            "selected_news": [{"link_id": news["link_id"]} for news in news_data],
-            "duplicate_groups": [],
-            "summary": {
-                "total_input": len(news_data),
-                "unique_kept": len(news_data),
-                "duplicate_found": 0,
-                "duplicate_groups_count": 0
-            }
-        }
-    
-    # 简单模拟：假设每3条新闻中有1条是重复的
-    selected_news = []
-    duplicate_groups = []
-    
-    for i in range(0, len(news_data), 3):
-        group = news_data[i:i+3]
-        if len(group) > 1:
-            # 保留第一条，其余标记为重复
-            kept = group[0]
-            dups = group[1:]
-            
-            selected_news.append({"link_id": kept["link_id"]})
-            
-            duplicate_groups.append({
-                "kept_id": kept["link_id"],
-                "duplicates": [d["link_id"] for d in dups],
-                "similarity_notes": f"模拟去重：保留{kept['link_id']}，移除{len(dups)}个重复项"
-            })
-        else:
-            # 只有一条，直接保留
-            selected_news.append({"link_id": group[0]["link_id"]})
-    
-    return {
-        "selected_news": selected_news,
-        "duplicate_groups": duplicate_groups,
-        "summary": {
-            "total_input": len(news_data),
-            "unique_kept": len(selected_news),
-            "duplicate_found": len(news_data) - len(selected_news),
-            "duplicate_groups_count": len(duplicate_groups)
-        }
-    }
 
 def save_to_postgres(dedup_result, workflow_id):
     """将去重结果保存到PostgreSQL数据库"""
@@ -288,7 +241,8 @@ def workflow_exists_in_pg(workflow_id):
         logger.error(f"检查workflow_id异常: {str(e)}")
         if conn:
             conn.close()
-        return False
+        # 抛出异常，确保数据库连接失败时不会继续处理
+        raise Exception(f"无法检查workflow_id是否存在: {str(e)}")
 
 def process_workflow(workflow_id=None):
     """处理指定工作流程，如果未指定则处理最新的工作流程"""
@@ -301,29 +255,33 @@ def process_workflow(workflow_id=None):
     
     logger.info(f"开始处理workflow_id: {workflow_id}")
     
-    # 检查是否已经处理过
-    if workflow_exists_in_pg(workflow_id):
-        logger.info(f"workflow_id {workflow_id} 已经处理过，跳过")
-        return True
-    
-    # 获取该workflow的新闻数据
-    news_data = get_news_by_workflow(workflow_id)
-    if not news_data:
-        logger.warning(f"workflow_id {workflow_id} 没有找到任何高重要性的新闻")
+    try:
+        # 检查是否已经处理过
+        if workflow_exists_in_pg(workflow_id):
+            logger.info(f"workflow_id {workflow_id} 已经处理过，跳过")
+            return True
+        
+        # 获取该workflow的新闻数据
+        news_data = get_news_by_workflow(workflow_id)
+        if not news_data:
+            logger.warning(f"workflow_id {workflow_id} 没有找到任何高重要性的新闻")
+            return False
+        
+        logger.info(f"获取到 {len(news_data)} 条新闻，准备进行去重处理")
+        
+        # 调用阿里智能体进行去重
+        dedup_result = call_ali_agent(news_data)
+        if not dedup_result:
+            logger.error("调用智能体失败，无法完成去重")
+            return False
+        
+        # 将结果保存到PostgreSQL
+        success = save_to_postgres(dedup_result, workflow_id)
+        
+        return success
+    except Exception as e:
+        logger.error(f"处理workflow过程中出现异常: {str(e)}")
         return False
-    
-    logger.info(f"获取到 {len(news_data)} 条新闻，准备进行去重处理")
-    
-    # 调用阿里智能体进行去重
-    dedup_result = call_ali_agent(news_data)
-    if not dedup_result:
-        logger.error("调用智能体失败，无法完成去重")
-        return False
-    
-    # 将结果保存到PostgreSQL
-    success = save_to_postgres(dedup_result, workflow_id)
-    
-    return success
 
 def main():
     """主函数"""
