@@ -12,8 +12,7 @@
 
 2. **核心组件**：
    - `deduplication_agent.py` - 去重处理主逻辑，调用阿里智能体进行去重分析
-   - `simple_api.py` - 提供简单直观的API接口，支持直接curl调用
-   - `monitor_api.py` - 结合API和监控功能，支持自动倒计时处理
+   - `app.py` - API服务，支持直接处理和自动监控功能
    - `create_pg_true_content_prepare.py` - 创建PostgreSQL表结构脚本
 
 ## 系统流程
@@ -62,17 +61,17 @@ python create_pg_true_content_prepare.py
 
 ## 使用方法
 
-系统提供两种API服务，可以根据需求选择使用。
+系统提供一个统一的API服务，支持直接处理和自动监控功能。
 
-### 方式一：简单API服务 (simple_api.py)
-
-适合直接调用处理特定workflow的场景，无监控功能。
+### 启动API服务
 
 ```bash
-python simple_api.py
+python app.py
 ```
 
 这将启动一个HTTP服务，默认监听在`http://localhost:5001`。
+
+### API功能
 
 通过curl命令调用API：
 
@@ -96,22 +95,11 @@ curl -X POST http://localhost:5001/api/process/latest
 curl -X POST http://localhost:5001/api/process/your_workflow_id
 ```
 
-### 方式二：带监控功能的API服务 (monitor_api.py)
+### 监控功能
 
-包含自动监控和倒计时功能，当检测到新的workflow_id时会自动触发倒计时处理。
+系统内置了智能监控功能，可以监控数据库中的新闻条目更新并自动处理：
 
-```bash
-python monitor_api.py
-```
-
-通过curl命令调用API：
-
-#### 检查API和监控状态
-```bash
-curl http://localhost:5001/api/status
-```
-
-#### 启动监控（10分钟倒计时）
+#### 启动监控（默认10分钟倒计时）
 ```bash
 curl -X POST http://localhost:5001/api/monitor/start
 ```
@@ -126,13 +114,46 @@ curl -X POST http://localhost:5001/api/monitor/start -H "Content-Type: applicati
 curl -X POST http://localhost:5001/api/monitor/stop
 ```
 
-监控模式工作原理：
-1. 定期检查MySQL数据库中的最新workflow_id
-2. 当检测到新的workflow_id时，开始倒计时
-3. 如果在倒计时期间没有检测到新数据更新，倒计时结束后自动处理该workflow
-4. 如果期间检测到新的workflow_id，则重置倒计时
+### 监控模式工作原理
 
-这种方式特别适合于需要等待数据更新稳定后再处理的场景，确保处理的数据是完整的。
+1. 系统每分钟检查MySQL数据库中的workflow和对应的新闻条目
+2. 当检测到新的workflow_id时，记录当前的新闻条目数量
+3. 持续监控该workflow_id下的新闻条目数量变化
+4. 如果有新的新闻条目添加，重置"无更新"计时器
+5. 如果连续10分钟没有新的新闻条目添加，系统认为数据收集已经稳定，开始倒计时（默认10分钟）
+6. 倒计时结束后，系统自动处理该workflow的数据
+7. 处理完成后，继续监控新的workflow更新
+
+这种机制确保了：
+- 只有当数据收集稳定后（10分钟无新增）才开始处理
+- 倒计时期间（默认10分钟）给予额外缓冲，确保处理的是完整数据
+- 处理完成后自动监控下一批数据
+
+## Docker部署
+
+系统支持Docker部署，可以使用以下命令构建并运行：
+
+```bash
+# 构建Docker镜像
+docker build -t news-dedup .
+
+# 运行容器
+docker run -d -p 5001:5001 --name news-dedup-api --env-file .env news-dedup
+```
+
+使用Docker Compose更加方便：
+
+```yaml
+version: '3'
+services:
+  news-dedup-api:
+    build: .
+    ports:
+      - "5001:5001"
+    env_file:
+      - .env
+    restart: always
+```
 
 ## 自动化使用
 
@@ -175,11 +196,21 @@ curl -X POST http://localhost:5001/api/process/latest
 
 ## 性能与优化
 
-* 系统默认只处理重要性为"高"或"中"的新闻，以减少处理量
+* 系统默认处理重要性为"高"或"中"的新闻，以平衡处理量和质量
 * 系统会自动跳过已处理过的workflow，避免重复分析
+* 监控逻辑基于数据更新频率智能决定处理时机，无需人工干预
+
+## 日志与监控
+
+* 系统自动记录详细的运行日志，包括：
+  - 新闻条目的数量变化
+  - 倒计时状态
+  - 处理结果
+* 日志文件保存在`app.log`中
+* 通过API状态接口随时查看监控状态
 
 ## 故障排除
 
 * 如果遇到数据库连接问题，请检查`.env`文件中的连接配置
-* 日志文件（`deduplication.log`、`simple_api.log`和`monitor_api.log`）记录了详细的运行信息，可用于排查问题
+* 日志文件（`deduplication.log`和`app.log`）记录了详细的运行信息，可用于排查问题
 * 确保已正确配置阿里智能体的应用ID和API密钥 
