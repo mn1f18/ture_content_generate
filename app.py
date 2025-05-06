@@ -186,6 +186,11 @@ def monitoring_thread():
             # 重置倒计时
             countdown_start = None
             monitor_state['countdown_start'] = None
+            
+            # 重置workflow_id，强制检查是否有新的workflow_id
+            last_workflow_id = None
+            monitor_state['last_workflow_id'] = None
+            logger.info(f"重置workflow_id监控状态，准备检查新的workflow")
         
         # 如果倒计时正在进行中，显示剩余时间
         elif countdown_start:
