@@ -13,6 +13,7 @@
 2. **核心组件**：
    - `deduplication_agent.py` - 去重处理主逻辑，调用阿里智能体进行去重分析
    - `simple_api.py` - 提供简单直观的API接口，支持直接curl调用
+   - `monitor_api.py` - 结合API和监控功能，支持自动倒计时处理
    - `create_pg_true_content_prepare.py` - 创建PostgreSQL表结构脚本
 
 ## 系统流程
@@ -61,9 +62,11 @@ python create_pg_true_content_prepare.py
 
 ## 使用方法
 
-系统提供简单直观的API接口，可以通过curl命令直接调用。
+系统提供两种API服务，可以根据需求选择使用。
 
-### 1. 启动API服务
+### 方式一：简单API服务 (simple_api.py)
+
+适合直接调用处理特定workflow的场景，无监控功能。
 
 ```bash
 python simple_api.py
@@ -71,7 +74,7 @@ python simple_api.py
 
 这将启动一个HTTP服务，默认监听在`http://localhost:5001`。
 
-### 2. 通过curl命令调用API
+通过curl命令调用API：
 
 #### 检查API状态
 ```bash
@@ -93,9 +96,47 @@ curl -X POST http://localhost:5001/api/process/latest
 curl -X POST http://localhost:5001/api/process/your_workflow_id
 ```
 
+### 方式二：带监控功能的API服务 (monitor_api.py)
+
+包含自动监控和倒计时功能，当检测到新的workflow_id时会自动触发倒计时处理。
+
+```bash
+python monitor_api.py
+```
+
+通过curl命令调用API：
+
+#### 检查API和监控状态
+```bash
+curl http://localhost:5001/api/status
+```
+
+#### 启动监控（10分钟倒计时）
+```bash
+curl -X POST http://localhost:5001/api/monitor/start
+```
+
+#### 设置自定义倒计时（例如5分钟）
+```bash
+curl -X POST http://localhost:5001/api/monitor/start -H "Content-Type: application/json" -d '{"minutes": 5}'
+```
+
+#### 停止监控
+```bash
+curl -X POST http://localhost:5001/api/monitor/stop
+```
+
+监控模式工作原理：
+1. 定期检查MySQL数据库中的最新workflow_id
+2. 当检测到新的workflow_id时，开始倒计时
+3. 如果在倒计时期间没有检测到新数据更新，倒计时结束后自动处理该workflow
+4. 如果期间检测到新的workflow_id，则重置倒计时
+
+这种方式特别适合于需要等待数据更新稳定后再处理的场景，确保处理的数据是完整的。
+
 ## 自动化使用
 
-如果需要定时自动处理，可以使用系统的计划任务工具：
+对于不需要监控的场景，可以使用系统的计划任务工具：
 
 ### Linux/Unix (Cron)
 ```bash
@@ -140,5 +181,5 @@ curl -X POST http://localhost:5001/api/process/latest
 ## 故障排除
 
 * 如果遇到数据库连接问题，请检查`.env`文件中的连接配置
-* 日志文件（`deduplication.log`和`simple_api.log`）记录了详细的运行信息，可用于排查问题
+* 日志文件（`deduplication.log`、`simple_api.log`和`monitor_api.log`）记录了详细的运行信息，可用于排查问题
 * 确保已正确配置阿里智能体的应用ID和API密钥 
