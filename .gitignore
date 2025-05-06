@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+env/
+
+# 日志文件
+*.log
+
+# 本地环境配置
+.env
+
+# IDE文件
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 其他不需要提交的文件
+*.bak
+*.tmp
+*~ 
