@@ -100,17 +100,40 @@ def get_news_by_workflow(workflow_id):
     return news_items
 
 def extract_json_from_text(text):
-    """从文本中提取JSON内容"""
+    """从文本中提取JSON内容，支持处理带有Markdown代码块格式的JSON"""
     try:
-        # 查找第一个{和最后一个}之间的内容
+        # 检查是否是Markdown格式的JSON代码块
+        if "```json" in text:
+            # 移除Markdown代码块标记
+            start = text.find("```json") + 7  # 7是```json的长度
+            end = text.rfind("```")
+            if end > start:  # 确保找到了结束标记
+                json_str = text[start:end].strip()
+                return json.loads(json_str)
+            
+        # 如果不是Markdown格式，尝试常规提取
         start = text.find('{')
         end = text.rfind('}')
         if start != -1 and end != -1:
             json_str = text[start:end+1]
             return json.loads(json_str)
-        return None
+        
+        # 如果以上方法都失败，尝试直接解析整个文本
+        return json.loads(text)
+            
     except json.JSONDecodeError as e:
         logger.error(f"JSON解析失败: {str(e)}, 文本: {text[:200]}...")
+        # 尝试清理文本后再解析
+        try:
+            # 移除可能的非JSON字符
+            clean_text = ''.join(c for c in text if c in '{}[]()":,0123456789.abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_ -\n\t')
+            start = clean_text.find('{')
+            end = clean_text.rfind('}')
+            if start != -1 and end != -1:
+                json_str = clean_text[start:end+1]
+                return json.loads(json_str)
+        except:
+            pass
         return None
 
 def call_ali_agent(news_data):
@@ -146,12 +169,27 @@ def call_ali_agent(news_data):
             # 从响应中提取JSON
             result = extract_json_from_text(response.output.text)
             if result:
-                return result
+                # 验证结果是否包含必要的字段
+                if 'selected_news' in result:
+                    selected_count = len(result['selected_news'])
+                    logger.info(f"解析成功: 智能体选中了{selected_count}条不重复的新闻（共{len(news_list)}条）")
+                    return result
+                else:
+                    logger.error("解析的JSON结果缺少selected_news字段")
+                    logger.debug(f"解析结果: {json.dumps(result, ensure_ascii=False)[:500]}...")
+                    return None
             else:
-                logger.error(f"无法从响应中提取JSON: {response.output.text[:200]}...")
+                logger.error(f"无法从响应中提取JSON: {response.output.text[:500]}...")
+                # 尝试保存原始响应以便调试
+                try:
+                    with open(f"agent_response_{datetime.now().strftime('%Y%m%d%H%M%S')}.txt", "w", encoding="utf-8") as f:
+                        f.write(response.output.text)
+                    logger.info("已保存原始响应到文件中")
+                except Exception as e:
+                    logger.error(f"保存响应失败: {str(e)}")
                 return None
         else:
-            logger.error(f"阿里智能体调用失败: {response.status_code}, {response.message}")
+            logger.error(f"阿里智能体调用失败: 状态码={response.status_code}, 消息={response.message}")
             return None
             
     except Exception as e:
@@ -256,15 +294,15 @@ def process_workflow(workflow_id=None):
     logger.info(f"开始处理workflow_id: {workflow_id}")
     
     try:
-        # 检查是否已经处理过
+        # 首先检查是否已经处理过，避免重复处理
         if workflow_exists_in_pg(workflow_id):
-            logger.info(f"workflow_id {workflow_id} 已经处理过，跳过")
+            logger.info(f"workflow_id {workflow_id} 已经存在于PostgreSQL中，跳过处理")
             return True
         
         # 获取该workflow的新闻数据
         news_data = get_news_by_workflow(workflow_id)
         if not news_data:
-            logger.warning(f"workflow_id {workflow_id} 没有找到任何高重要性的新闻")
+            logger.warning(f"workflow_id {workflow_id} 没有找到任何符合条件的新闻")
             return False
         
         logger.info(f"获取到 {len(news_data)} 条新闻，准备进行去重处理")
@@ -277,6 +315,8 @@ def process_workflow(workflow_id=None):
         
         # 将结果保存到PostgreSQL
         success = save_to_postgres(dedup_result, workflow_id)
+        if success:
+            logger.info(f"成功将去重结果保存到PostgreSQL，workflow_id: {workflow_id}")
         
         return success
     except Exception as e:
