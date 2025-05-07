@@ -1,13 +1,27 @@
 import psycopg2
 import logging
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from logging.handlers import RotatingFileHandler
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+log_handler = RotatingFileHandler(
+    "db_setup.log", 
+    maxBytes=5*1024*1024,  # 5MB
+    backupCount=3,
+    encoding='utf-8'
 )
+log_handler.setFormatter(log_formatter)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
 logger = logging.getLogger("DBSetup")
+logger.setLevel(logging.INFO)
+if logger.handlers:
+    logger.handlers.clear()
+logger.addHandler(log_handler)
+logger.addHandler(console_handler)
+logger.propagate = False
 
 # 数据库连接配置
 PG_CONFIG = {

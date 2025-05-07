@@ -29,10 +29,14 @@ log_handler.setFormatter(log_formatter)
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 
+# 确保删除已存在的处理器，避免重复添加
 logger = logging.getLogger("API")
 logger.setLevel(logging.INFO)
+if logger.handlers:
+    logger.handlers.clear()
 logger.addHandler(log_handler)
 logger.addHandler(console_handler)
+logger.propagate = False  # 防止日志传播到根日志器
 
 # 设置第三方库日志级别为WARNING，减少噪音
 logging.getLogger("mysql.connector").setLevel(logging.WARNING)
