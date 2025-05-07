@@ -1,6 +1,6 @@
-# 新闻内容去重系统
+# 新闻内容去重与优化系统
 
-该系统用于处理初步爬取的新闻内容，通过智能去重分析将不重复的内容保存到数据库中，以提高后续内容处理的质量。
+该系统用于处理初步爬取的新闻内容，通过智能去重分析将不重复的内容保存到数据库中，并通过阿里智能体进行内容优化和审核，以提高内容质量。
 
 ## 系统架构
 
@@ -8,18 +8,28 @@
 
 1. **数据库结构**：
    - MySQL中存储原始爬取数据(`news_content.step3_content`表)
-   - PostgreSQL中存储去重后结果(`true_content_prepare`表)
+   - PostgreSQL中存储去重后的中间结果(`true_content_prepare`表)
+   - MySQL中存储优化后的最终内容(`true_content`和`true_content_en`表)
 
 2. **核心组件**：
    - `deduplication_agent.py` - 去重处理主逻辑，调用阿里智能体进行去重分析
+   - `process_content_review.py` - 内容审核和优化处理，调用阿里智能体进行内容优化
    - `app.py` - API服务，支持直接处理和自动监控功能
    - `create_pg_true_content_prepare.py` - 创建PostgreSQL表结构脚本
+   - `create_true_content_tables.py` - 创建MySQL优化内容表结构脚本
 
 ## 系统流程
 
-1. 从MySQL数据库中获取新闻数据（按workflow_id分批）
-2. 使用阿里百炼智能体进行新闻去重分析
-3. 将去重后的数据保存到PostgreSQL数据库
+1. **内容去重阶段**：
+   - 从MySQL数据库中获取新闻数据（按workflow_id分批）
+   - 使用阿里百炼智能体进行新闻去重分析
+   - 将去重后的link_id保存到PostgreSQL数据库
+
+2. **内容优化阶段**：
+   - 获取去重后的`link_id`列表
+   - 从原始数据表中提取对应内容
+   - 调用阿里智能体进行内容审核与优化
+   - 将优化后的内容保存到`true_content`(中文)和`true_content_en`(英文)表
 
 ## 环境配置
 
@@ -42,6 +52,7 @@ PG_DATABASE=postgres
 
 # 阿里智能体配置
 ALI_AGENT_APP_ID=your_ali_agent_app_id
+ALI_AGENT_CONTENT_APP_ID=your_content_app_id
 DASHSCOPE_API_KEY=your_dashscope_api_key
 ```
 
@@ -53,10 +64,14 @@ pip install -r requirements.txt
 
 ## 初始化设置
 
-首次使用时，需要创建PostgreSQL数据库表：
+首次使用时，需要创建数据库表：
 
 ```bash
+# 创建PostgreSQL中去重结果表
 python create_pg_true_content_prepare.py
+
+# 创建MySQL中优化内容存储表
+python create_true_content_tables.py
 ```
 
 ## 使用方法
@@ -99,7 +114,7 @@ curl -X POST http://localhost:5001/api/process/your_workflow_id
 
 系统内置了智能监控功能，可以监控数据库中的新闻条目更新并自动处理：
 
-#### 启动监控（默认10分钟倒计时）
+#### 启动监控（默认1分钟倒计时）
 ```bash
 curl -X POST http://localhost:5001/api/monitor/start
 ```
@@ -120,14 +135,16 @@ curl -X POST http://localhost:5001/api/monitor/stop
 2. 当检测到新的workflow_id时，记录当前的新闻条目数量
 3. 持续监控该workflow_id下的新闻条目数量变化
 4. 如果有新的新闻条目添加，重置"无更新"计时器
-5. 如果连续10分钟没有新的新闻条目添加，系统认为数据收集已经稳定，开始倒计时（默认10分钟）
-6. 倒计时结束后，系统自动处理该workflow的数据
+5. 如果连续10分钟没有新的新闻条目添加，系统认为数据收集已经稳定，开始倒计时（默认1分钟）
+6. 倒计时结束后，系统自动执行处理流程：
+   - 首先执行去重分析
+   - 然后执行内容优化和审核
 7. 处理完成后，继续监控新的workflow更新
 
 这种机制确保了：
 - 只有当数据收集稳定后（10分钟无新增）才开始处理
-- 倒计时期间（默认10分钟）给予额外缓冲，确保处理的是完整数据
-- 处理完成后自动监控下一批数据
+- 倒计时期间给予额外缓冲，确保处理的是完整数据
+- 自动化执行完整的工作流程，包括去重和内容优化
 
 ## Docker部署
 
@@ -135,10 +152,10 @@ curl -X POST http://localhost:5001/api/monitor/stop
 
 ```bash
 # 构建Docker镜像
-docker build -t news-dedup .
+docker build -t news-content-system .
 
 # 运行容器
-docker run -d -p 5001:5001 --name news-dedup-api --env-file .env news-dedup
+docker run -d -p 5001:5001 --name news-content-api --env-file .env news-content-system
 ```
 
 使用Docker Compose更加方便：
@@ -146,7 +163,7 @@ docker run -d -p 5001:5001 --name news-dedup-api --env-file .env news-dedup
 ```yaml
 version: '3'
 services:
-  news-dedup-api:
+  news-content-api:
     build: .
     ports:
       - "5001:5001"
@@ -173,9 +190,11 @@ curl -X POST http://localhost:5001/api/process/latest
 
 ## 智能体说明
 
+### 去重智能体
+
 系统使用阿里智能体进行新闻去重，智能体会分析新闻标题和事件标签的相似度，从而识别内容相似的新闻。
 
-智能体接收的输入格式为：
+去重智能体接收的输入格式为：
 ```json
 {
   "news_list": [
@@ -189,28 +208,55 @@ curl -X POST http://localhost:5001/api/process/latest
 }
 ```
 
-智能体返回的JSON结构包含：
+去重智能体返回的JSON结构包含：
 - 保留的新闻ID列表（`selected_news`）
 - 重复组信息（`duplicate_groups`，包括相似性分析）
 - 处理结果摘要（`summary`）
+
+### 内容优化智能体
+
+系统使用另一个阿里智能体进行内容优化和审核，该智能体会对内容进行质量评估，优化标题和内容，并提供审核结果。
+
+内容优化智能体接收的输入格式为：
+```json
+{
+  "link_id": "新闻ID",
+  "title": "新闻标题",
+  "content": "新闻内容",
+  "event_tags": ["事件标签1", "事件标签2"],
+  "space_tags": ["地区标签1", "地区标签2"],
+  "impact_factors": ["影响因素1", "影响因素2"],
+  "cat_tags": ["品类标签1", "品类标签2"]
+}
+```
+
+内容优化智能体返回的JSON结构包含：
+- 优化后的标题和内容
+- 重要程度评分（importance_score）
+- 审核状态（可上架/未通过）
+- 审核评价（review_note）
+- 英文翻译版本
 
 ## 性能与优化
 
 * 系统默认处理重要性为"高"或"中"的新闻，以平衡处理量和质量
 * 系统会自动跳过已处理过的workflow，避免重复分析
-* 监控逻辑基于数据更新频率智能决定处理时机，无需人工干预
+* 所有数据库操作都增加了重试机制，提高系统稳定性
+* 使用连接池和事务控制，确保数据一致性和处理效率
 
 ## 日志与监控
 
 * 系统自动记录详细的运行日志，包括：
-  - 新闻条目的数量变化
-  - 倒计时状态
-  - 处理结果
-* 日志文件保存在`app.log`中
+  - 去重处理状态和结果
+  - 内容优化处理状态和结果
+  - 数据库操作状态
+  - 倒计时和监控状态
+* 日志文件保存在`app.log`、`deduplication.log`和`content_review.log`中
 * 通过API状态接口随时查看监控状态
 
 ## 故障排除
 
-* 如果遇到数据库连接问题，请检查`.env`文件中的连接配置
-* 日志文件（`deduplication.log`和`app.log`）记录了详细的运行信息，可用于排查问题
-* 确保已正确配置阿里智能体的应用ID和API密钥 
+* 如果遇到数据库连接问题，系统会自动尝试重连（最多3次）
+* 日志文件记录了详细的运行信息，可用于排查问题
+* 确保已正确配置两个阿里智能体的应用ID和API密钥
+* 内容优化处理依赖于去重处理的结果，确保先完成去重处理 

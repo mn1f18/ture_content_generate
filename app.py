@@ -13,6 +13,8 @@ from logging.handlers import RotatingFileHandler
 
 # 导入去重代理模块的核心函数
 from deduplication_agent import process_workflow, get_latest_workflow_id, get_news_by_workflow
+# 导入内容审核处理模块
+from process_content_review import process_content_review
 
 # 加载环境变量
 load_dotenv()
@@ -69,7 +71,8 @@ monitor_state = {
     'last_workflow_id': None,
     'countdown_start': None,
     'countdown_minutes': 1,  # 默认倒计时1分钟
-    'monitor_thread': None
+    'monitor_thread': None,
+    'last_processed_workflow_id': None  # 替换processed_workflow_ids集合，只存储最近处理的workflow_id
 }
 
 def get_latest_workflow_info():
@@ -147,6 +150,12 @@ def monitoring_thread():
             time.sleep(30)
             continue
         
+        # 检查是否已经处理过该workflow_id
+        if current_workflow_id == monitor_state['last_processed_workflow_id']:
+            logger.info(f"Workflow_id: {current_workflow_id} 已处理过，等待新的workflow_id")
+            time.sleep(60)  # 等待1分钟后再次检查
+            continue
+            
         current_time = datetime.now()
         
         # 如果是新的workflow_id
@@ -190,10 +199,23 @@ def monitoring_thread():
             logger.info(f"倒计时结束，开始处理workflow_id: {current_workflow_id}, 共{last_news_count}条新闻")
             
             # 处理workflow
+            workflow_success = False
             try:
-                success = process_workflow(current_workflow_id)
-                if success:
+                workflow_success = process_workflow(current_workflow_id)
+                if workflow_success:
                     logger.info(f"成功处理workflow_id: {current_workflow_id}")
+                    
+                    # 添加内容审核处理
+                    logger.info(f"开始执行内容审核处理，workflow_id: {current_workflow_id}")
+                    content_success = process_content_review(current_workflow_id)
+                    if content_success:
+                        logger.info(f"成功完成内容审核处理，workflow_id: {current_workflow_id}")
+                    else:
+                        logger.error(f"内容审核处理失败，workflow_id: {current_workflow_id}")
+                    
+                    # 处理成功后，更新最后处理的workflow_id
+                    monitor_state['last_processed_workflow_id'] = current_workflow_id
+                    logger.info(f"更新最后处理的workflow_id为: {current_workflow_id}")
                 else:
                     logger.error(f"处理workflow_id: {current_workflow_id} 失败")
             except Exception as e:
@@ -345,6 +367,11 @@ def start_monitoring():
                     monitor_state['countdown_minutes'] = minutes
             except (ValueError, TypeError):
                 pass
+                
+        # 重置最后处理的workflow_id（可选）
+        if 'reset_processed' in data and data['reset_processed']:
+            monitor_state['last_processed_workflow_id'] = None
+            logger.info("已重置最后处理的workflow_id记录")
         
         # 启动监控线程
         monitor_state['is_monitoring'] = True
@@ -397,6 +424,25 @@ def stop_monitoring():
             'message': f"停止监控时出错: {str(e)}"
         }), 500
 
+@app.route('/api/monitor/reset', methods=['POST'])
+def reset_processed_workflows():
+    """重置最后处理的workflow_id"""
+    global monitor_state
+    
+    try:
+        monitor_state['last_processed_workflow_id'] = None
+        
+        return jsonify({
+            'success': True,
+            'message': '已重置处理记录，所有workflow_id将被重新处理'
+        })
+    except Exception as e:
+        logger.error(f"重置处理记录时出错: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f"重置处理记录时出错: {str(e)}"
+        }), 500
+
 @app.route('/', methods=['GET'])
 def home():
     """主页，显示简单的使用说明"""
@@ -437,6 +483,12 @@ def home():
                 'method': 'POST',
                 'description': '停止监控模式',
                 'curl_example': 'curl -X POST http://localhost:5001/api/monitor/stop'
+            },
+            {
+                'url': '/api/monitor/reset',
+                'method': 'POST',
+                'description': '重置已处理的workflow_id列表',
+                'curl_example': 'curl -X POST http://localhost:5001/api/monitor/reset'
             }
         ]
     }
