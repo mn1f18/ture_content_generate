@@ -9,20 +9,32 @@ from datetime import datetime
 from dotenv import load_dotenv
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from dashscope import Application
+from logging.handlers import RotatingFileHandler
 
 # 加载环境变量
 load_dotenv()
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("deduplication.log"),
-        logging.StreamHandler()
-    ]
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+log_handler = RotatingFileHandler(
+    "deduplication.log", 
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5,
+    encoding='utf-8'
 )
+log_handler.setFormatter(log_formatter)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
 logger = logging.getLogger("DeduplicationAgent")
+logger.setLevel(logging.INFO)
+logger.addHandler(log_handler)
+logger.addHandler(console_handler)
+
+# 设置第三方库日志级别为WARNING，减少噪音
+logging.getLogger("mysql.connector").setLevel(logging.WARNING)
+logging.getLogger("dashscope").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # MySQL配置
 MYSQL_CONFIG = {

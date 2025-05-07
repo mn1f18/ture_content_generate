@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
+from logging.handlers import RotatingFileHandler
 
 # 导入去重代理模块的核心函数
 from deduplication_agent import process_workflow, get_latest_workflow_id, get_news_by_workflow
@@ -17,15 +18,26 @@ from deduplication_agent import process_workflow, get_latest_workflow_id, get_ne
 load_dotenv()
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("app.log"),
-        logging.StreamHandler()
-    ]
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+log_handler = RotatingFileHandler(
+    "app.log", 
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=5,
+    encoding='utf-8'
 )
+log_handler.setFormatter(log_formatter)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
 logger = logging.getLogger("API")
+logger.setLevel(logging.INFO)
+logger.addHandler(log_handler)
+logger.addHandler(console_handler)
+
+# 设置第三方库日志级别为WARNING，减少噪音
+logging.getLogger("mysql.connector").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # MySQL配置
 MYSQL_CONFIG = {
@@ -52,7 +64,7 @@ monitor_state = {
     'is_monitoring': False,
     'last_workflow_id': None,
     'countdown_start': None,
-    'countdown_minutes': 10,  # 默认倒计时10分钟
+    'countdown_minutes': 1,  # 默认倒计时1分钟
     'monitor_thread': None
 }
 
