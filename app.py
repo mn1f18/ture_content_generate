@@ -151,6 +151,11 @@ def check_db_connection_health():
     pool_stats = get_pool_stats()
     logger.info(f"连接池状态: MySQL({pool_stats['mysql']['active_connections']}), PostgreSQL({pool_stats['postgres']['active_connections']})")
     
+    # 检查是否需要重置PostgreSQL连接池
+    if 'pg_pool' in globals() and pool_stats['postgres']['active_connections'] >= 3:
+        logger.warning("PostgreSQL连接池使用率较高，执行紧急重置")
+        emergency_pg_pool_reset()
+    
     # 检查MySQL连接
     try:
         conn = get_mysql_connection()
@@ -180,6 +185,8 @@ def check_db_connection_health():
     except Exception as e:
         db_health_status['postgres'] = False
         logger.error(f"PostgreSQL连接健康检查失败: {str(e)}")
+        # 连接失败时尝试重置连接池
+        emergency_pg_pool_reset()
     
     return db_health_status
 
@@ -289,8 +296,14 @@ def get_pg_connection(max_retries=3):
             # 尝试从连接池获取连接
             if 'pg_pool' in globals():
                 conn = pg_pool.getconn()
-                # 标记这是一个池连接
-                setattr(conn, '_is_pooled', True)
+                # 标记这是一个池连接 - 使用安全的方式设置属性
+                try:
+                    setattr(conn, '_is_pooled', True)
+                except:
+                    # 如果无法设置属性，使用字典来跟踪连接
+                    if not hasattr(globals(), '_pg_pooled_connections'):
+                        globals()['_pg_pooled_connections'] = set()
+                    globals()['_pg_pooled_connections'].add(id(conn))
                 
                 # 测试连接是否可用
                 cursor = conn.cursor()
@@ -304,7 +317,11 @@ def get_pg_connection(max_retries=3):
             else:
                 # 如果连接池不可用，使用普通连接
                 conn = psycopg2.connect(**PG_CONFIG)
-                setattr(conn, '_is_pooled', False)
+                # 标记为非池连接
+                try:
+                    setattr(conn, '_is_pooled', False)
+                except:
+                    pass
                 
                 if retry_count > 0:
                     logger.info(f"PostgreSQL直接连接成功(尝试 {retry_count+1}/{max_retries})")
@@ -316,14 +333,35 @@ def get_pg_connection(max_retries=3):
             # 处理上一次尝试的连接对象，确保它被关闭
             if 'conn' in locals() and conn:
                 try:
-                    if not conn.closed:
-                        if hasattr(conn, '_is_pooled') and conn._is_pooled and 'pg_pool' in globals():
-                            # 将损坏的连接标记为有问题，这样连接池会丢弃它
-                            conn.close()
-                            logger.debug("关闭失败的PostgreSQL池连接")
+                    if not getattr(conn, 'closed', False):
+                        # 检查是否为池连接
+                        is_pooled = False
+                        try:
+                            is_pooled = getattr(conn, '_is_pooled', False)
+                        except:
+                            # 尝试从跟踪集合中查找
+                            if hasattr(globals(), '_pg_pooled_connections'):
+                                is_pooled = id(conn) in globals()['_pg_pooled_connections']
+                                
+                        if is_pooled and 'pg_pool' in globals():
+                            try:
+                                # 不再使用连接，告诉连接池丢弃它
+                                pg_pool.putconn(conn, close=True)
+                                logger.debug("通知连接池丢弃损坏的PostgreSQL连接")
+                                # 从跟踪集合中移除
+                                if hasattr(globals(), '_pg_pooled_connections') and id(conn) in globals()['_pg_pooled_connections']:
+                                    globals()['_pg_pooled_connections'].remove(id(conn))
+                            except:
+                                try:
+                                    conn.close()
+                                except:
+                                    pass
                         else:
-                            conn.close()
-                            logger.debug("关闭失败的PostgreSQL直接连接")
+                            try:
+                                conn.close()
+                                logger.debug("关闭失败的PostgreSQL直接连接")
+                            except:
+                                pass
                 except Exception as close_err:
                     logger.warning(f"关闭失败的PostgreSQL连接出错: {str(close_err)}")
             
@@ -346,45 +384,104 @@ def release_pg_connection(conn):
         
     try:
         # 检查是否是从连接池获取的连接
-        if hasattr(conn, '_is_pooled') and conn._is_pooled:
+        is_pooled = False
+        try:
+            is_pooled = getattr(conn, '_is_pooled', False)
+        except:
+            # 尝试从跟踪集合中查找
+            if hasattr(globals(), '_pg_pooled_connections'):
+                is_pooled = id(conn) in globals()['_pg_pooled_connections']
+        
+        if is_pooled:
             # 池连接
             if 'pg_pool' in globals():
                 try:
-                    # 尝试测试连接是否仍然可用
-                    if not conn.closed:
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT 1")
-                        cursor.close()
-                        # 连接有效，将其返回池
+                    # 简化连接测试，只检查是否关闭
+                    if not getattr(conn, 'closed', True):
+                        # 连接有效，直接返回池
                         pg_pool.putconn(conn)
                         logger.debug("PostgreSQL连接已返回连接池")
+                        
+                        # 从跟踪集合中移除
+                        if hasattr(globals(), '_pg_pooled_connections') and id(conn) in globals()['_pg_pooled_connections']:
+                            globals()['_pg_pooled_connections'].remove(id(conn))
                     else:
                         # 连接已关闭，不返回池
                         logger.warning("尝试释放已关闭的PostgreSQL连接")
                 except Exception as e:
                     # 连接有问题，关闭它而不是返回池
                     try:
-                        if not conn.closed:
-                            conn.close()
-                        logger.warning(f"PostgreSQL连接有问题，已关闭而非返回池: {str(e)}")
+                        if not getattr(conn, 'closed', True):
+                            pg_pool.putconn(conn, close=True)  # 放回池但标记为关闭
+                            logger.warning(f"PostgreSQL连接有问题，标记为关闭: {str(e)}")
+                            
+                            # 从跟踪集合中移除
+                            if hasattr(globals(), '_pg_pooled_connections') and id(conn) in globals()['_pg_pooled_connections']:
+                                globals()['_pg_pooled_connections'].remove(id(conn))
                     except:
+                        try:
+                            conn.close()
+                        except:
+                            pass
                         logger.error("关闭问题PostgreSQL连接失败")
             else:
                 try:
-                    if not conn.closed:
+                    if not getattr(conn, 'closed', True):
                         conn.close()
                 except Exception as e:
                     logger.error(f"关闭PostgreSQL连接失败: {str(e)}")
         else:
             # 直接创建的连接
             try:
-                if not conn.closed:
+                if not getattr(conn, 'closed', True):
                     conn.close()
                     logger.debug("关闭PostgreSQL直接连接")
             except Exception as e:
                 logger.error(f"关闭PostgreSQL直接连接失败: {str(e)}")
     except Exception as e:
         logger.error(f"释放PostgreSQL连接时发生未预期的错误: {str(e)}")
+
+# 添加紧急修复函数来释放所有PostgreSQL连接
+def emergency_pg_pool_reset():
+    """紧急重置PostgreSQL连接池，释放所有连接"""
+    if 'pg_pool' in globals():
+        try:
+            # 尝试获取连接池使用情况
+            used_count = 0
+            if hasattr(pg_pool, '_used'):
+                used_count = len(pg_pool._used)
+            
+            logger.warning(f"执行PostgreSQL连接池紧急重置 (当前使用连接: {used_count})")
+            
+            # 关闭并重新创建连接池
+            try:
+                pg_pool.closeall()
+            except Exception as e:
+                logger.error(f"关闭PostgreSQL连接池失败: {str(e)}")
+            
+            # 重新创建连接池
+            try:
+                pg_pool_config = PG_CONFIG.copy()
+                globals()['pg_pool'] = psycopg2.pool.ThreadedConnectionPool(
+                    minconn=1,
+                    maxconn=10,  # 增加最大连接数
+                    user=pg_pool_config['user'],
+                    password=pg_pool_config['password'],
+                    host=pg_pool_config['host'],
+                    port=pg_pool_config['port'],
+                    database=pg_pool_config['dbname']
+                )
+                # 清空跟踪集合
+                if hasattr(globals(), '_pg_pooled_connections'):
+                    globals()['_pg_pooled_connections'] = set()
+                    
+                logger.info("PostgreSQL连接池已重置")
+                return True
+            except Exception as e:
+                logger.error(f"重新创建PostgreSQL连接池失败: {str(e)}")
+        except Exception as e:
+            logger.error(f"PostgreSQL连接池紧急重置失败: {str(e)}")
+    return False
 
 app = Flask(__name__)
 
