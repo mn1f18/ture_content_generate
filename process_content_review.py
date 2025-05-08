@@ -17,8 +17,8 @@ from dashscope import Application  # 添加import
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 log_handler = RotatingFileHandler(
     "content_review.log", 
-    maxBytes=10*1024*1024,  # 10MB
-    backupCount=5,
+    maxBytes=5*1024*1024,  # 5MB
+    backupCount=3,
     encoding='utf-8'
 )
 log_handler.setFormatter(log_formatter)
@@ -56,6 +56,7 @@ PG_CONFIG = {
 
 # 阿里云智能体配置
 ALI_AGENT_CONTENT_APP_ID = os.getenv('ALI_AGENT_CONTENT_APP_ID')
+ALI_AGENT_CONTENT_EN_APP_ID = os.getenv('ALI_AGENT_CONTENT_EN_APP_ID')
 DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY')
 API_URL = f"https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
 
@@ -76,12 +77,13 @@ def get_deduplicated_link_ids(workflow_id, max_retries=3):
             query = """
             SELECT link_id FROM true_content_prepare 
             WHERE workflow_id = %s
+            ORDER BY score DESC
             """
             
             cursor.execute(query, (workflow_id,))
-            results = cursor.fetchall()
+            rows = cursor.fetchall()
             
-            link_ids = [row[0] for row in results]
+            link_ids = [row[0] for row in rows]
             logger.info(f"从PostgreSQL获取到{len(link_ids)}条去重后的link_id，workflow_id: {workflow_id}")
             
             return link_ids
@@ -118,31 +120,46 @@ def get_original_content(link_id, max_retries=3):
             query = """
             SELECT 
                 link_id, title, content, 
-                event_tags, space_tags, cat_tags, impact_factors,
+                JSON_EXTRACT(event_tags, '$') as event_tags,
+                JSON_EXTRACT(space_tags, '$') as space_tags,
+                JSON_EXTRACT(impact_factors, '$') as impact_factors,
+                JSON_EXTRACT(cat_tags, '$') as cat_tags,
                 publish_time, importance, source_note, homepage_url, workflow_id
             FROM news_content.step3_content 
             WHERE link_id = %s
-            AND state LIKE '%爬取成功%'
+            LIMIT 1
             """
             
             cursor.execute(query, (link_id,))
-            result = cursor.fetchone()
+            row = cursor.fetchone()
             
-            if result:
-                # 转换JSON字符串为Python列表
-                for tag_field in ['event_tags', 'space_tags', 'cat_tags', 'impact_factors']:
-                    if result[tag_field]:
-                        try:
-                            result[tag_field] = json.loads(result[tag_field])
-                        except json.JSONDecodeError:
-                            result[tag_field] = []
-                    else:
-                        result[tag_field] = []
+            if row:
+                # 处理JSON字段
+                result = {
+                    "link_id": row["link_id"],
+                    "title": row["title"],
+                    "content": row["content"],
+                    "publish_time": row["publish_time"],
+                    "importance": row["importance"],
+                    "source_note": row["source_note"],
+                    "homepage_url": row["homepage_url"],
+                    "workflow_id": row["workflow_id"]
+                }
                 
-                logger.info(f"成功获取link_id为{link_id}的原始内容")
+                # 解析JSON字段
+                for field in ["event_tags", "space_tags", "impact_factors", "cat_tags"]:
+                    try:
+                        if row[field]:
+                            result[field] = json.loads(row[field])
+                        else:
+                            result[field] = []
+                    except:
+                        result[field] = []
+                
+                logger.info(f"获取link_id: {link_id}的原始内容成功")
                 return result
             else:
-                logger.warning(f"未找到link_id为{link_id}的内容")
+                logger.warning(f"未找到link_id为{link_id}的原始内容")
                 return None
         except mysql.connector.Error as e:
             retry_count += 1
@@ -163,12 +180,24 @@ def get_original_content(link_id, max_retries=3):
     logger.error(f"获取link_id为{link_id}的原始内容失败，已达到最大重试次数")
     return None
 
-def call_ali_agent(article_data):
+def call_ali_agent(article_data, is_english=False):
     """
     调用阿里云智能体进行内容审核和优化
+    
+    参数:
+    - article_data: 文章数据字典
+    - is_english: 是否调用英文智能体
     """
-    if not DASHSCOPE_API_KEY or not ALI_AGENT_CONTENT_APP_ID:
-        logger.error("阿里智能体API密钥或应用ID未配置，无法进行内容审核")
+    if not DASHSCOPE_API_KEY:
+        logger.error("阿里智能体API密钥未配置，无法进行内容审核")
+        return None
+    
+    # 根据是否英文选择不同的应用ID
+    app_id = ALI_AGENT_CONTENT_EN_APP_ID if is_english else ALI_AGENT_CONTENT_APP_ID
+    agent_type = "英文" if is_english else "中文"
+    
+    if not app_id:
+        logger.error(f"阿里{agent_type}智能体应用ID未配置，无法进行内容审核")
         return None
     
     # 准备输入数据
@@ -189,17 +218,17 @@ def call_ali_agent(article_data):
     
     while retry_count < max_retries:
         try:
-            logger.info(f"开始调用阿里智能体进行内容审核，link_id: {article_data['link_id']}")
+            logger.info(f"开始调用阿里{agent_type}智能体进行内容审核，link_id: {article_data['link_id']}")
             
             # 调用阿里百炼应用，与deduplication_agent.py保持一致
             response = Application.call(
                 api_key=DASHSCOPE_API_KEY,
-                app_id=ALI_AGENT_CONTENT_APP_ID,
+                app_id=app_id,
                 prompt=input_data
             )
             
             if response.status_code == 200:
-                logger.info(f"阿里智能体调用成功，link_id: {article_data['link_id']}")
+                logger.info(f"阿里{agent_type}智能体调用成功，link_id: {article_data['link_id']}")
                 
                 # 从响应中提取JSON
                 try:
@@ -221,16 +250,16 @@ def call_ali_agent(article_data):
                     logger.error(f"解析响应时出错: {str(e)}")
                     return None
             else:
-                logger.error(f"阿里智能体调用失败: 状态码={response.status_code}, 消息={response.message}")
+                logger.error(f"阿里{agent_type}智能体调用失败: 状态码={response.status_code}, 消息={response.message}")
                 retry_count += 1
                 time.sleep(2)  # 等待2秒后重试
                 
         except Exception as e:
-            logger.error(f"调用阿里智能体时出错: {str(e)}")
+            logger.error(f"调用阿里{agent_type}智能体时出错: {str(e)}")
             retry_count += 1
             time.sleep(2)  # 等待2秒后重试
     
-    logger.error(f"调用阿里智能体失败，已达到最大重试次数")
+    logger.error(f"调用阿里{agent_type}智能体失败，已达到最大重试次数")
     return None
 
 def extract_json_from_text(text):
@@ -270,11 +299,19 @@ def extract_json_from_text(text):
             pass
         return None
 
-def save_to_true_content(review_result, original_data, max_retries=3):
+def save_to_true_content(review_result, original_data, is_english=False, max_retries=3):
     """
-    将审核结果保存到true_content表，添加重试机制
+    将审核结果保存到true_content表或true_content_en表，添加重试机制
+    
+    参数:
+    - review_result: 审核结果
+    - original_data: 原始数据
+    - is_english: 是否保存到英文表格
+    - max_retries: 最大重试次数
     """
+    table_name = "true_content_en" if is_english else "true_content"
     retry_count = 0
+    
     while retry_count < max_retries:
         conn = None
         try:
@@ -282,8 +319,8 @@ def save_to_true_content(review_result, original_data, max_retries=3):
             cursor = conn.cursor()
             
             # 准备插入的数据
-            insert_query = """
-            INSERT INTO news_content.true_content (
+            insert_query = f"""
+            INSERT INTO news_content.{table_name} (
                 link_id, title, content, 
                 event_tags, space_tags, impact_factors, cat_tags,
                 publish_time, importance, importance_score, 
@@ -309,7 +346,7 @@ def save_to_true_content(review_result, original_data, max_retries=3):
             
             # 从原始数据中获取publish_time, importance, source_note, homepage_url, workflow_id
             publish_time = original_data.get("publish_time", "")
-            importance = original_data.get("importance", "中")  # 默认为中
+            importance = original_data.get("importance", "中" if not is_english else "Medium")  # 默认值根据语言不同
             source_note = original_data.get("source_note", "")
             homepage_url = original_data.get("homepage_url", "")
             workflow_id = original_data.get("workflow_id", "")
@@ -323,7 +360,7 @@ def save_to_true_content(review_result, original_data, max_retries=3):
             impact_factors = json.dumps(review_result.get("impact_factors", []), ensure_ascii=False)
             cat_tags = json.dumps(review_result.get("cat_tags", []), ensure_ascii=False)
             importance_score = review_result.get("importance_score", 0.3)
-            status = review_result.get("status", "未通过")
+            status = review_result.get("status", "未通过" if not is_english else "Rejected")
             review_note = review_result.get("review_note", "")
             
             # 执行插入操作
@@ -336,7 +373,7 @@ def save_to_true_content(review_result, original_data, max_retries=3):
             ))
             
             conn.commit()
-            logger.info(f"成功将审核结果保存到true_content表，link_id: {link_id}")
+            logger.info(f"成功将审核结果保存到{table_name}表，link_id: {link_id}")
             return True
             
         except mysql.connector.Error as e:
@@ -350,7 +387,7 @@ def save_to_true_content(review_result, original_data, max_retries=3):
                     pass
             time.sleep(wait_time)
         except Exception as e:
-            logger.error(f"保存到true_content表失败: {str(e)}")
+            logger.error(f"保存到{table_name}表失败: {str(e)}")
             if conn:
                 try:
                     conn.rollback()
@@ -365,22 +402,29 @@ def save_to_true_content(review_result, original_data, max_retries=3):
                 except:
                     pass
     
-    logger.error(f"保存到true_content表失败，已达到最大重试次数")
+    logger.error(f"保存到{table_name}表失败，已达到最大重试次数")
     return False
 
-def check_workflow_exists(workflow_id, max_retries=3):
+def check_workflow_exists(workflow_id, is_english=False, max_retries=3):
     """
-    检查指定的workflow_id是否已经存在于true_content表中
+    检查指定的workflow_id是否已经存在于true_content表或true_content_en表中
+    
+    参数:
+    - workflow_id: 工作流ID
+    - is_english: 是否检查英文表格
+    - max_retries: 最大重试次数
     """
+    table_name = "true_content_en" if is_english else "true_content"
     retry_count = 0
+    
     while retry_count < max_retries:
         conn = None
         try:
             conn = mysql.connector.connect(**MYSQL_CONFIG)
             cursor = conn.cursor()
             
-            query = """
-            SELECT COUNT(*) FROM news_content.true_content 
+            query = f"""
+            SELECT COUNT(*) FROM news_content.{table_name} 
             WHERE workflow_id = %s
             LIMIT 1
             """
@@ -391,7 +435,7 @@ def check_workflow_exists(workflow_id, max_retries=3):
             # 如果计数大于0，说明workflow_id已存在
             exists = result[0] > 0
             if exists:
-                logger.info(f"workflow_id: {workflow_id} 已经存在于true_content表中")
+                logger.info(f"workflow_id: {workflow_id} 已经存在于{table_name}表中")
             return exists
             
         except mysql.connector.Error as e:
@@ -400,7 +444,7 @@ def check_workflow_exists(workflow_id, max_retries=3):
             logger.warning(f"检查workflow_id时MySQL连接错误，尝试重试 ({retry_count}/{max_retries}): {str(e)}, 等待{wait_time}秒")
             time.sleep(wait_time)
         except Exception as e:
-            logger.error(f"检查workflow_id是否存在失败: {str(e)}")
+            logger.error(f"检查workflow_id是否存在于{table_name}表中失败: {str(e)}")
             return False
         finally:
             if conn:
@@ -410,7 +454,7 @@ def check_workflow_exists(workflow_id, max_retries=3):
                 except:
                     pass
     
-    logger.error(f"检查workflow_id: {workflow_id} 失败，已达到最大重试次数")
+    logger.error(f"检查workflow_id: {workflow_id} 在{table_name}表中是否存在失败，已达到最大重试次数")
     return False
 
 def process_content_review(workflow_id):
@@ -419,9 +463,13 @@ def process_content_review(workflow_id):
     """
     logger.info(f"开始处理workflow_id: {workflow_id}的内容审核")
     
-    # 检查workflow_id是否已经存在
-    if check_workflow_exists(workflow_id):
-        logger.info(f"跳过workflow_id: {workflow_id}，已存在于数据库中")
+    # 检查中文表和英文表中是否已存在该workflow_id
+    cn_exists = check_workflow_exists(workflow_id, is_english=False)
+    en_exists = check_workflow_exists(workflow_id, is_english=True)
+    
+    # 如果中文和英文表都已存在，则跳过处理
+    if cn_exists and en_exists:
+        logger.info(f"跳过workflow_id: {workflow_id}，已同时存在于中英文数据库中")
         return True
     
     # 1. 获取去重后的link_id列表
@@ -430,8 +478,11 @@ def process_content_review(workflow_id):
         logger.warning(f"没有找到workflow_id: {workflow_id}的去重link_id")
         return False
     
-    success_count = 0
-    fail_count = 0
+    # 统计成功和失败数量
+    cn_success_count = 0
+    cn_fail_count = 0
+    en_success_count = 0
+    en_fail_count = 0
     
     # 2. 逐个处理每个link_id
     total_count = len(link_ids)
@@ -443,30 +494,54 @@ def process_content_review(workflow_id):
             original_data = get_original_content(link_id)
             if not original_data:
                 logger.warning(f"跳过link_id: {link_id}，未找到原始内容")
-                fail_count += 1
+                cn_fail_count += 1
+                en_fail_count += 1
                 continue
             
-            # 4. 调用阿里智能体审核内容
-            review_result = call_ali_agent(original_data)
-            if not review_result:
-                logger.warning(f"跳过link_id: {link_id}，智能体审核失败")
-                fail_count += 1
-                continue
+            # 4a. 如果中文表不存在该workflow_id，调用中文智能体审核内容
+            if not cn_exists:
+                cn_review_result = call_ali_agent(original_data, is_english=False)
+                if not cn_review_result:
+                    logger.warning(f"跳过link_id: {link_id}，中文智能体审核失败")
+                    cn_fail_count += 1
+                else:
+                    # 5a. 保存中文审核结果到true_content表
+                    if save_to_true_content(cn_review_result, original_data, is_english=False):
+                        cn_success_count += 1
+                    else:
+                        cn_fail_count += 1
             
-            # 5. 保存审核结果到true_content表
-            if save_to_true_content(review_result, original_data):
-                success_count += 1
-            else:
-                fail_count += 1
+            # 4b. 如果英文表不存在该workflow_id，调用英文智能体审核内容
+            if not en_exists:
+                # 短暂暂停，避免API请求过于频繁
+                time.sleep(1)
+                
+                en_review_result = call_ali_agent(original_data, is_english=True)
+                if not en_review_result:
+                    logger.warning(f"跳过link_id: {link_id}，英文智能体审核失败")
+                    en_fail_count += 1
+                else:
+                    # 5b. 保存英文审核结果到true_content_en表
+                    if save_to_true_content(en_review_result, original_data, is_english=True):
+                        en_success_count += 1
+                    else:
+                        en_fail_count += 1
             
             # 短暂暂停，避免API请求过于频繁
             time.sleep(1)
         except Exception as e:
             logger.error(f"处理link_id: {link_id}时发生异常: {str(e)}")
-            fail_count += 1
+            cn_fail_count += 1 if not cn_exists else 0
+            en_fail_count += 1 if not en_exists else 0
     
-    logger.info(f"内容审核处理完成，成功: {success_count}，失败: {fail_count}，总计: {total_count}")
-    return success_count > 0
+    # 记录处理结果
+    if not cn_exists:
+        logger.info(f"中文内容审核处理完成，成功: {cn_success_count}，失败: {cn_fail_count}，总计: {total_count}")
+    if not en_exists:
+        logger.info(f"英文内容审核处理完成，成功: {en_success_count}，失败: {en_fail_count}，总计: {total_count}")
+    
+    # 只要有一种语言处理成功，就返回成功
+    return (cn_success_count > 0 or not cn_exists) or (en_success_count > 0 or not en_exists)
 
 # 从deduplication_agent.py模块中添加到监控线程处理逻辑中
 def add_content_review_to_monitor():
