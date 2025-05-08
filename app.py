@@ -65,37 +65,80 @@ PG_CONFIG = {
     'dbname': os.getenv('PG_DATABASE')
 }
 
-# 创建数据库连接池
-try:
-    # MySQL连接池配置
-    mysql_pool_config = MYSQL_CONFIG.copy()
-    mysql_pool_config.update({
-        'pool_name': 'mysql_pool',
-        'pool_size': 5,  # 连接池大小
-        'pool_reset_session': True,  # 重置会话状态
-        'connect_timeout': 30,  # 连接超时时间
-    })
+# 创建数据库连接池，添加重试机制
+def initialize_connection_pools(max_retries=3):
+    """初始化数据库连接池，带重试机制"""
+    global mysql_pool, pg_pool
     
-    # 创建MySQL连接池
-    mysql_pool = mysql.connector.pooling.MySQLConnectionPool(**mysql_pool_config)
-    logger.info("MySQL连接池初始化成功")
+    # MySQL连接池初始化
+    mysql_retry_count = 0
+    mysql_success = False
     
-    # PostgreSQL连接池配置
-    pg_pool_config = PG_CONFIG.copy()
-    # 创建PostgreSQL连接池
-    pg_pool = psycopg2.pool.ThreadedConnectionPool(
-        minconn=1,
-        maxconn=5,
-        user=pg_pool_config['user'],
-        password=pg_pool_config['password'],
-        host=pg_pool_config['host'],
-        port=pg_pool_config['port'],
-        database=pg_pool_config['dbname']
-    )
-    logger.info("PostgreSQL连接池初始化成功")
-except Exception as e:
-    logger.error(f"初始化数据库连接池失败: {str(e)}")
-    # 程序仍然继续，但会使用非连接池方式作为备选
+    while mysql_retry_count < max_retries and not mysql_success:
+        try:
+            # MySQL连接池配置
+            mysql_pool_config = MYSQL_CONFIG.copy()
+            mysql_pool_config.update({
+                'pool_name': 'mysql_pool',
+                'pool_size': 5,  # 连接池大小
+                'pool_reset_session': True,  # 重置会话状态
+                'connect_timeout': 30,  # 连接超时时间
+            })
+            
+            # 创建MySQL连接池
+            globals()['mysql_pool'] = mysql.connector.pooling.MySQLConnectionPool(**mysql_pool_config)
+            logger.info("MySQL连接池初始化成功")
+            mysql_success = True
+            
+        except Exception as e:
+            mysql_retry_count += 1
+            wait_time = 2 ** mysql_retry_count  # 指数退避
+            
+            if mysql_retry_count < max_retries:
+                logger.warning(f"MySQL连接池初始化失败，尝试第{mysql_retry_count+1}次重试: {str(e)}，等待{wait_time}秒")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"MySQL连接池初始化最终失败: {str(e)}，将使用非连接池方式")
+    
+    # PostgreSQL连接池初始化
+    pg_retry_count = 0
+    pg_success = False
+    
+    while pg_retry_count < max_retries and not pg_success:
+        try:
+            # PostgreSQL连接池配置
+            pg_pool_config = PG_CONFIG.copy()
+            # 创建PostgreSQL连接池
+            globals()['pg_pool'] = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,  # 增加最大连接数
+                user=pg_pool_config['user'],
+                password=pg_pool_config['password'],
+                host=pg_pool_config['host'],
+                port=pg_pool_config['port'],
+                database=pg_pool_config['dbname']
+            )
+            logger.info("PostgreSQL连接池初始化成功")
+            pg_success = True
+            
+        except Exception as e:
+            pg_retry_count += 1
+            wait_time = 2 ** pg_retry_count  # 指数退避
+            
+            if pg_retry_count < max_retries:
+                logger.warning(f"PostgreSQL连接池初始化失败，尝试第{pg_retry_count+1}次重试: {str(e)}，等待{wait_time}秒")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"PostgreSQL连接池初始化最终失败: {str(e)}，将使用非连接池方式")
+    
+    # 初始化跟踪集合
+    if 'pg_pool' in globals() and '_pg_pooled_connections' not in globals():
+        globals()['_pg_pooled_connections'] = set()
+    
+    return mysql_success or pg_success
+
+# 执行初始化
+initialize_connection_pools(max_retries=3)
 
 # 健康检查定时器
 last_health_check = datetime.now()
@@ -1064,4 +1107,11 @@ atexit.register(close_connection_pools)
 if __name__ == '__main__':
     # 启动时执行健康检查
     check_db_connection_health()
+    
+    # 如果连接池初始化失败，程序启动时尝试再次初始化
+    if 'mysql_pool' not in globals() or 'pg_pool' not in globals():
+        logger.info("程序启动时尝试重新初始化连接池...")
+        initialize_connection_pools(max_retries=3)
+        
+    # 启动Flask应用
     app.run(debug=True, host='0.0.0.0', port=5001) 
