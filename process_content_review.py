@@ -368,11 +368,61 @@ def save_to_true_content(review_result, original_data, max_retries=3):
     logger.error(f"保存到true_content表失败，已达到最大重试次数")
     return False
 
+def check_workflow_exists(workflow_id, max_retries=3):
+    """
+    检查指定的workflow_id是否已经存在于true_content表中
+    """
+    retry_count = 0
+    while retry_count < max_retries:
+        conn = None
+        try:
+            conn = mysql.connector.connect(**MYSQL_CONFIG)
+            cursor = conn.cursor()
+            
+            query = """
+            SELECT COUNT(*) FROM news_content.true_content 
+            WHERE workflow_id = %s
+            LIMIT 1
+            """
+            
+            cursor.execute(query, (workflow_id,))
+            result = cursor.fetchone()
+            
+            # 如果计数大于0，说明workflow_id已存在
+            exists = result[0] > 0
+            if exists:
+                logger.info(f"workflow_id: {workflow_id} 已经存在于true_content表中")
+            return exists
+            
+        except mysql.connector.Error as e:
+            retry_count += 1
+            wait_time = 2 * retry_count  # 指数退避
+            logger.warning(f"检查workflow_id时MySQL连接错误，尝试重试 ({retry_count}/{max_retries}): {str(e)}, 等待{wait_time}秒")
+            time.sleep(wait_time)
+        except Exception as e:
+            logger.error(f"检查workflow_id是否存在失败: {str(e)}")
+            return False
+        finally:
+            if conn:
+                try:
+                    cursor.close()
+                    conn.close()
+                except:
+                    pass
+    
+    logger.error(f"检查workflow_id: {workflow_id} 失败，已达到最大重试次数")
+    return False
+
 def process_content_review(workflow_id):
     """
     处理内容审核的主函数
     """
     logger.info(f"开始处理workflow_id: {workflow_id}的内容审核")
+    
+    # 检查workflow_id是否已经存在
+    if check_workflow_exists(workflow_id):
+        logger.info(f"跳过workflow_id: {workflow_id}，已存在于数据库中")
+        return True
     
     # 1. 获取去重后的link_id列表
     link_ids = get_deduplicated_link_ids(workflow_id)
