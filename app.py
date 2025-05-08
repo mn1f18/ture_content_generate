@@ -2,7 +2,9 @@ import os
 import json
 import logging
 import mysql.connector
+import mysql.connector.pooling
 import psycopg2
+import psycopg2.pool
 import time
 import threading
 from datetime import datetime, timedelta
@@ -63,6 +65,181 @@ PG_CONFIG = {
     'dbname': os.getenv('PG_DATABASE')
 }
 
+# 创建数据库连接池
+try:
+    # MySQL连接池配置
+    mysql_pool_config = MYSQL_CONFIG.copy()
+    mysql_pool_config.update({
+        'pool_name': 'mysql_pool',
+        'pool_size': 5,  # 连接池大小
+        'pool_reset_session': True,  # 重置会话状态
+        'connect_timeout': 30,  # 连接超时时间
+    })
+    
+    # 创建MySQL连接池
+    mysql_pool = mysql.connector.pooling.MySQLConnectionPool(**mysql_pool_config)
+    logger.info("MySQL连接池初始化成功")
+    
+    # PostgreSQL连接池配置
+    pg_pool_config = PG_CONFIG.copy()
+    # 创建PostgreSQL连接池
+    pg_pool = psycopg2.pool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=5,
+        user=pg_pool_config['user'],
+        password=pg_pool_config['password'],
+        host=pg_pool_config['host'],
+        port=pg_pool_config['port'],
+        database=pg_pool_config['dbname']
+    )
+    logger.info("PostgreSQL连接池初始化成功")
+except Exception as e:
+    logger.error(f"初始化数据库连接池失败: {str(e)}")
+    # 程序仍然继续，但会使用非连接池方式作为备选
+
+# 健康检查定时器
+last_health_check = datetime.now()
+db_health_status = {
+    'mysql': True,
+    'postgres': True
+}
+
+def check_db_connection_health():
+    """定期检查数据库连接健康状态"""
+    global last_health_check, db_health_status
+    
+    # 每10分钟检查一次
+    current_time = datetime.now()
+    if (current_time - last_health_check).total_seconds() < 600:  # 10分钟
+        return
+    
+    last_health_check = current_time
+    logger.info("执行数据库连接健康检查...")
+    
+    # 检查MySQL连接
+    try:
+        conn = get_mysql_connection()
+        if conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            release_mysql_connection(conn)
+            db_health_status['mysql'] = True
+            logger.info("MySQL连接健康")
+    except Exception as e:
+        db_health_status['mysql'] = False
+        logger.error(f"MySQL连接健康检查失败: {str(e)}")
+    
+    # 检查PostgreSQL连接
+    try:
+        conn = get_pg_connection()
+        if conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            release_pg_connection(conn)
+            db_health_status['postgres'] = True
+            logger.info("PostgreSQL连接健康")
+    except Exception as e:
+        db_health_status['postgres'] = False
+        logger.error(f"PostgreSQL连接健康检查失败: {str(e)}")
+    
+    return db_health_status
+
+def get_mysql_connection(max_retries=3):
+    """从连接池获取MySQL连接，带重试机制"""
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            # 尝试从连接池获取连接
+            if 'mysql_pool' in globals():
+                conn = mysql_pool.get_connection()
+                if retry_count > 0:
+                    logger.info(f"MySQL连接池重连成功(尝试 {retry_count+1}/{max_retries})")
+                return conn
+            else:
+                # 如果连接池不可用，使用普通连接
+                conn = mysql.connector.connect(**MYSQL_CONFIG)
+                if retry_count > 0:
+                    logger.info(f"MySQL直接连接成功(尝试 {retry_count+1}/{max_retries})")
+                return conn
+        except Exception as e:
+            retry_count += 1
+            last_error = e
+            wait_time = 2 ** retry_count  # 指数退避
+            logger.error(f"MySQL连接失败(尝试 {retry_count}/{max_retries}): {str(e)}")
+            
+            # 如果还有重试机会，等待后重试
+            if retry_count < max_retries:
+                logger.info(f"将在{wait_time}秒后重试MySQL连接...")
+                time.sleep(wait_time)
+    
+    # 连接全部失败
+    logger.error(f"达到最大重试次数({max_retries})，无法连接到MySQL数据库")
+    raise last_error
+
+def release_mysql_connection(conn):
+    """释放MySQL连接回连接池"""
+    try:
+        if conn:
+            # 检查是否是从连接池获取的连接
+            if hasattr(conn, 'close') and hasattr(conn, 'is_connected'):
+                if conn.is_connected():
+                    conn.close()
+    except Exception as e:
+        logger.error(f"释放MySQL连接失败: {str(e)}")
+
+def get_pg_connection(max_retries=3):
+    """从连接池获取PostgreSQL连接，带重试机制"""
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            # 尝试从连接池获取连接
+            if 'pg_pool' in globals():
+                conn = pg_pool.getconn()
+                if retry_count > 0:
+                    logger.info(f"PostgreSQL连接池重连成功(尝试 {retry_count+1}/{max_retries})")
+                return conn
+            else:
+                # 如果连接池不可用，使用普通连接
+                conn = psycopg2.connect(**PG_CONFIG)
+                if retry_count > 0:
+                    logger.info(f"PostgreSQL直接连接成功(尝试 {retry_count+1}/{max_retries})")
+                return conn
+        except Exception as e:
+            retry_count += 1
+            last_error = e
+            wait_time = 2 ** retry_count  # 指数退避
+            logger.error(f"PostgreSQL连接失败(尝试 {retry_count}/{max_retries}): {str(e)}")
+            
+            # 如果还有重试机会，等待后重试
+            if retry_count < max_retries:
+                logger.info(f"将在{wait_time}秒后重试PostgreSQL连接...")
+                time.sleep(wait_time)
+    
+    # 连接全部失败
+    logger.error(f"达到最大重试次数({max_retries})，无法连接到PostgreSQL数据库")
+    raise last_error
+
+def release_pg_connection(conn):
+    """释放PostgreSQL连接回连接池"""
+    try:
+        if conn:
+            # 检查是否是从连接池获取的连接
+            if 'pg_pool' in globals():
+                pg_pool.putconn(conn)
+            else:
+                if not conn.closed:
+                    conn.close()
+    except Exception as e:
+        logger.error(f"释放PostgreSQL连接失败: {str(e)}")
+
 app = Flask(__name__)
 
 # 全局变量，存储监控状态
@@ -72,13 +249,33 @@ monitor_state = {
     'countdown_start': None,
     'countdown_minutes': 1,  # 默认倒计时1分钟
     'monitor_thread': None,
-    'last_processed_workflow_id': None  # 替换processed_workflow_ids集合，只存储最近处理的workflow_id
+    'last_processed_workflow_id': None,  # 替换processed_workflow_ids集合，只存储最近处理的workflow_id
+    'thread_heartbeat': datetime.now(),  # 新增：线程心跳时间
+    'thread_healthy': True  # 新增：线程健康状态
 }
 
-def get_latest_workflow_info():
+def check_thread_health():
+    """检查监控线程的健康状态"""
+    global monitor_state
+    if not monitor_state['is_monitoring']:
+        return True
+    
+    current_time = datetime.now()
+    # 如果超过5分钟没有心跳更新，认为线程不健康
+    if (current_time - monitor_state['thread_heartbeat']).total_seconds() > 300:  # 5分钟
+        monitor_state['thread_healthy'] = False
+        logger.error("监控线程超过5分钟未更新心跳，可能已经死亡")
+        return False
+    
+    return True
+
+def get_latest_workflow_info(max_retries=3):
     """获取最新的workflow_id和最后更新时间"""
+    conn = None
+    cursor = None
+    
     try:
-        conn = mysql.connector.connect(**MYSQL_CONFIG)
+        conn = get_mysql_connection(max_retries=max_retries)
         cursor = conn.cursor(dictionary=True)
         
         query = """
@@ -93,20 +290,25 @@ def get_latest_workflow_info():
         cursor.execute(query)
         result = cursor.fetchone()
         
-        cursor.close()
-        conn.close()
-        
         if result:
             return result['workflow_id'], result['latest_update']
         return None, None
     except Exception as e:
         logger.error(f"获取最新workflow_id失败: {str(e)}")
         return None, None
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            release_mysql_connection(conn)
 
-def get_news_count_by_workflow(workflow_id):
+def get_news_count_by_workflow(workflow_id, max_retries=3):
     """获取指定workflow_id的新闻条目数量"""
+    conn = None
+    cursor = None
+    
     try:
-        conn = mysql.connector.connect(**MYSQL_CONFIG)
+        conn = get_mysql_connection(max_retries=max_retries)
         cursor = conn.cursor()
         
         query = """
@@ -120,15 +322,17 @@ def get_news_count_by_workflow(workflow_id):
         cursor.execute(query, (workflow_id,))
         result = cursor.fetchone()
         
-        cursor.close()
-        conn.close()
-        
         if result:
             return result[0]
         return 0
     except Exception as e:
         logger.error(f"获取workflow_id {workflow_id}的新闻数量失败: {str(e)}")
         return 0
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            release_mysql_connection(conn)
 
 def monitoring_thread():
     """监控线程，检查数据更新并倒计时处理"""
@@ -142,121 +346,142 @@ def monitoring_thread():
     logger.info(f"开始监控，倒计时窗口设置为{monitor_state['countdown_minutes']}分钟")
     
     while monitor_state['is_monitoring']:
-        # 获取最新的workflow_id和时间戳
-        current_workflow_id, update_time = get_latest_workflow_info()
-        
-        if not current_workflow_id:
-            logger.warning("未找到任何workflow，等待30秒后重试")
-            time.sleep(30)
-            continue
-        
-        # 检查是否已经处理过该workflow_id
-        if current_workflow_id == monitor_state['last_processed_workflow_id']:
-            logger.info(f"Workflow_id: {current_workflow_id} 已处理过，等待新的workflow_id")
-            time.sleep(60)  # 等待1分钟后再次检查
-            continue
+        try:
+            # 更新线程心跳
+            monitor_state['thread_heartbeat'] = datetime.now()
+            monitor_state['thread_healthy'] = True
             
-        current_time = datetime.now()
-        
-        # 如果是新的workflow_id
-        if current_workflow_id != last_workflow_id:
-            logger.info(f"检测到新的workflow_id: {current_workflow_id}")
-            last_workflow_id = current_workflow_id
-            monitor_state['last_workflow_id'] = current_workflow_id
-            last_news_count = get_news_count_by_workflow(current_workflow_id)
-            logger.info(f"初始新闻数量: {last_news_count}")
+            # 定期检查数据库连接健康状态
+            check_db_connection_health()
             
-            # 重置倒计时和无更新计时器
-            countdown_start = None
-            monitor_state['countdown_start'] = None
-            no_update_timer = current_time
-        else:
-            # 检查当前workflow_id的新闻数量是否有变化
-            current_news_count = get_news_count_by_workflow(current_workflow_id)
+            # 获取最新的workflow_id和时间戳
+            current_workflow_id, update_time = get_latest_workflow_info()
             
-            if current_news_count > last_news_count:
-                # 有新的新闻条目
-                logger.info(f"检测到新的新闻条目: {current_news_count - last_news_count}条 (总计: {current_news_count}条)")
-                last_news_count = current_news_count
+            if not current_workflow_id:
+                logger.warning("未找到任何workflow，等待30秒后重试")
+                time.sleep(30)
+                continue
+            
+            # 检查是否已经处理过该workflow_id
+            if current_workflow_id == monitor_state['last_processed_workflow_id']:
+                logger.info(f"Workflow_id: {current_workflow_id} 已处理过，等待新的workflow_id")
+                time.sleep(60)  # 等待1分钟后再次检查
+                continue
                 
-                # 重置无更新计时器
+            current_time = datetime.now()
+            
+            # 如果是新的workflow_id
+            if current_workflow_id != last_workflow_id:
+                logger.info(f"检测到新的workflow_id: {current_workflow_id}")
+                last_workflow_id = current_workflow_id
+                monitor_state['last_workflow_id'] = current_workflow_id
+                last_news_count = get_news_count_by_workflow(current_workflow_id)
+                logger.info(f"初始新闻数量: {last_news_count}")
+                
+                # 重置倒计时和无更新计时器
+                countdown_start = None
+                monitor_state['countdown_start'] = None
                 no_update_timer = current_time
-                
-                # 如果倒计时未开始，则不做任何操作
-                if countdown_start is None:
-                    logger.info(f"继续收集数据中...")
-            elif no_update_timer is not None:
-                # 如果10分钟内没有新的新闻条目，开始倒计时
-                if countdown_start is None and (current_time - no_update_timer).total_seconds() >= 600:  # 10分钟
-                    logger.info(f"10分钟内没有新的新闻条目，开始倒计时...")
-                    countdown_start = current_time
-                    monitor_state['countdown_start'] = countdown_start
-                    countdown_end = countdown_start + timedelta(minutes=monitor_state['countdown_minutes'])
-                    logger.info(f"开始倒计时，计划在 {countdown_end.strftime('%Y-%m-%d %H:%M:%S')} 处理数据")
-        
-        # 如果倒计时已经开始且已经到达结束时间
-        if countdown_start and current_time >= countdown_start + timedelta(minutes=monitor_state['countdown_minutes']):
-            logger.info(f"倒计时结束，开始处理workflow_id: {current_workflow_id}, 共{last_news_count}条新闻")
-            
-            # 处理workflow
-            workflow_success = False
-            try:
-                workflow_success = process_workflow(current_workflow_id)
-                if workflow_success:
-                    logger.info(f"成功处理workflow_id: {current_workflow_id}")
-                    
-                    # 添加内容审核处理
-                    logger.info(f"开始执行内容审核处理，workflow_id: {current_workflow_id}")
-                    content_success = process_content_review(current_workflow_id)
-                    if content_success:
-                        logger.info(f"成功完成内容审核处理，workflow_id: {current_workflow_id}")
-                    else:
-                        logger.error(f"内容审核处理失败，workflow_id: {current_workflow_id}")
-                    
-                    # 处理成功后，更新最后处理的workflow_id
-                    monitor_state['last_processed_workflow_id'] = current_workflow_id
-                    logger.info(f"更新最后处理的workflow_id为: {current_workflow_id}")
-                else:
-                    logger.error(f"处理workflow_id: {current_workflow_id} 失败")
-            except Exception as e:
-                logger.error(f"处理workflow时出错: {str(e)}")
-            
-            # 重置倒计时
-            countdown_start = None
-            monitor_state['countdown_start'] = None
-            
-            # 重置workflow_id，强制检查是否有新的workflow_id
-            last_workflow_id = None
-            monitor_state['last_workflow_id'] = None
-            logger.info(f"重置workflow_id监控状态，准备检查新的workflow")
-        
-        # 如果倒计时正在进行中，显示剩余时间
-        elif countdown_start:
-            remaining = countdown_start + timedelta(minutes=monitor_state['countdown_minutes']) - current_time
-            remaining_minutes = int(remaining.total_seconds() / 60)
-            remaining_seconds = int(remaining.total_seconds() % 60)
-            logger.info(f"倒计时中: 还剩 {remaining_minutes}分{remaining_seconds}秒 后处理 workflow_id: {current_workflow_id}")
-        # 没有倒计时但监控仍在进行
-        else:
-            # 计算自上次更新以来的时间
-            if no_update_timer:
-                minutes_since_update = int((current_time - no_update_timer).total_seconds() / 60)
-                logger.info(f"持续监控中: workflow_id: {current_workflow_id}, 当前新闻数: {last_news_count}, 已有{minutes_since_update}分钟无新增")
             else:
-                logger.info(f"持续监控中: workflow_id: {current_workflow_id}, 当前新闻数: {last_news_count}")
-        
-        # 等待一段时间后继续检查
-        time.sleep(60)  # 每分钟检查一次
+                # 检查当前workflow_id的新闻数量是否有变化
+                current_news_count = get_news_count_by_workflow(current_workflow_id)
+                
+                if current_news_count > last_news_count:
+                    # 有新的新闻条目
+                    logger.info(f"检测到新的新闻条目: {current_news_count - last_news_count}条 (总计: {current_news_count}条)")
+                    last_news_count = current_news_count
+                    
+                    # 重置无更新计时器
+                    no_update_timer = current_time
+                    
+                    # 如果倒计时未开始，则不做任何操作
+                    if countdown_start is None:
+                        logger.info(f"继续收集数据中...")
+                elif no_update_timer is not None:
+                    # 如果10分钟内没有新的新闻条目，开始倒计时
+                    if countdown_start is None and (current_time - no_update_timer).total_seconds() >= 600:  # 10分钟
+                        logger.info(f"10分钟内没有新的新闻条目，开始倒计时...")
+                        countdown_start = current_time
+                        monitor_state['countdown_start'] = countdown_start
+                        countdown_end = countdown_start + timedelta(minutes=monitor_state['countdown_minutes'])
+                        logger.info(f"开始倒计时，计划在 {countdown_end.strftime('%Y-%m-%d %H:%M:%S')} 处理数据")
+            
+            # 如果倒计时已经开始且已经到达结束时间
+            if countdown_start and current_time >= countdown_start + timedelta(minutes=monitor_state['countdown_minutes']):
+                logger.info(f"倒计时结束，开始处理workflow_id: {current_workflow_id}, 共{last_news_count}条新闻")
+                
+                # 处理workflow
+                workflow_success = False
+                try:
+                    workflow_success = process_workflow(current_workflow_id)
+                    if workflow_success:
+                        logger.info(f"成功处理workflow_id: {current_workflow_id}")
+                        
+                        # 添加内容审核处理
+                        logger.info(f"开始执行内容审核处理，workflow_id: {current_workflow_id}")
+                        content_success = process_content_review(current_workflow_id)
+                        if content_success:
+                            logger.info(f"成功完成内容审核处理，workflow_id: {current_workflow_id}")
+                        else:
+                            logger.error(f"内容审核处理失败，workflow_id: {current_workflow_id}")
+                        
+                        # 处理成功后，更新最后处理的workflow_id
+                        monitor_state['last_processed_workflow_id'] = current_workflow_id
+                        logger.info(f"更新最后处理的workflow_id为: {current_workflow_id}")
+                    else:
+                        logger.error(f"处理workflow_id: {current_workflow_id} 失败")
+                except Exception as e:
+                    logger.error(f"处理workflow时出错: {str(e)}")
+                
+                # 重置倒计时
+                countdown_start = None
+                monitor_state['countdown_start'] = None
+                
+                # 重置workflow_id，强制检查是否有新的workflow_id
+                last_workflow_id = None
+                monitor_state['last_workflow_id'] = None
+                logger.info(f"重置workflow_id监控状态，准备检查新的workflow")
+            
+            # 如果倒计时正在进行中，显示剩余时间
+            elif countdown_start:
+                remaining = countdown_start + timedelta(minutes=monitor_state['countdown_minutes']) - current_time
+                remaining_minutes = int(remaining.total_seconds() / 60)
+                remaining_seconds = int(remaining.total_seconds() % 60)
+                logger.info(f"倒计时中: 还剩 {remaining_minutes}分{remaining_seconds}秒 后处理 workflow_id: {current_workflow_id}")
+            # 没有倒计时但监控仍在进行
+            else:
+                # 计算自上次更新以来的时间
+                if no_update_timer:
+                    minutes_since_update = int((current_time - no_update_timer).total_seconds() / 60)
+                    logger.info(f"持续监控中: workflow_id: {current_workflow_id}, 当前新闻数: {last_news_count}, 已有{minutes_since_update}分钟无新增")
+                else:
+                    logger.info(f"持续监控中: workflow_id: {current_workflow_id}, 当前新闻数: {last_news_count}")
+            
+            # 等待一段时间后继续检查
+            time.sleep(60)  # 每分钟检查一次
+            
+        except Exception as e:
+            logger.error(f"监控线程发生异常: {str(e)}")
+            # 发生异常时，等待一段时间后继续
+            time.sleep(60)
+            continue
 
 @app.route('/api/status', methods=['GET'])
 def api_status():
     """API状态检查"""
+    # 检查线程健康
+    is_thread_healthy = check_thread_health()
+    # 检查数据库连接健康
+    db_status = check_db_connection_health()
+    
     return jsonify({
         'status': 'online',
         'is_monitoring': monitor_state['is_monitoring'],
         'last_workflow_id': monitor_state['last_workflow_id'],
         'countdown_start': monitor_state['countdown_start'].strftime('%Y-%m-%d %H:%M:%S') if monitor_state['countdown_start'] else None,
         'countdown_minutes': monitor_state['countdown_minutes'],
+        'thread_healthy': is_thread_healthy,
+        'db_health': db_status,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     })
 
@@ -264,7 +489,7 @@ def api_status():
 def get_latest_workflow():
     """获取最新的workflow信息"""
     try:
-        workflow_id, update_time = get_latest_workflow_info()
+        workflow_id, update_time = get_latest_workflow_info(max_retries=3)
         if workflow_id:
             # 获取该workflow的新闻数量
             news_data = get_news_by_workflow(workflow_id)
@@ -304,10 +529,23 @@ def process_latest():
         success = process_workflow(workflow_id)
         
         if success:
-            return jsonify({
-                'success': True,
-                'message': f"成功处理workflow: {workflow_id}"
-            })
+            # 添加内容审核处理
+            logger.info(f"开始执行内容审核处理，workflow_id: {workflow_id}")
+            content_success = process_content_review(workflow_id)
+            if content_success:
+                logger.info(f"成功完成内容审核处理，workflow_id: {workflow_id}")
+                # 更新已处理的workflow_id
+                monitor_state['last_processed_workflow_id'] = workflow_id
+                return jsonify({
+                    'success': True,
+                    'message': f"成功处理workflow: {workflow_id}，包括去重和内容审核"
+                })
+            else:
+                logger.error(f"内容审核处理失败，workflow_id: {workflow_id}")
+                return jsonify({
+                    'success': False,
+                    'message': f"处理workflow: {workflow_id} 成功，但内容审核失败"
+                }), 500
         else:
             return jsonify({
                 'success': False,
@@ -328,10 +566,23 @@ def process_specific(workflow_id):
         success = process_workflow(workflow_id)
         
         if success:
-            return jsonify({
-                'success': True,
-                'message': f"成功处理workflow: {workflow_id}"
-            })
+            # 添加内容审核处理
+            logger.info(f"开始执行内容审核处理，workflow_id: {workflow_id}")
+            content_success = process_content_review(workflow_id)
+            if content_success:
+                logger.info(f"成功完成内容审核处理，workflow_id: {workflow_id}")
+                # 更新已处理的workflow_id
+                monitor_state['last_processed_workflow_id'] = workflow_id
+                return jsonify({
+                    'success': True,
+                    'message': f"成功处理workflow: {workflow_id}，包括去重和内容审核"
+                })
+            else:
+                logger.error(f"内容审核处理失败，workflow_id: {workflow_id}")
+                return jsonify({
+                    'success': False,
+                    'message': f"处理workflow: {workflow_id} 成功，但内容审核失败"
+                }), 500
         else:
             return jsonify({
                 'success': False,
@@ -375,6 +626,8 @@ def start_monitoring():
         
         # 启动监控线程
         monitor_state['is_monitoring'] = True
+        monitor_state['thread_heartbeat'] = datetime.now()
+        monitor_state['thread_healthy'] = True
         monitor_state['monitor_thread'] = threading.Thread(target=monitoring_thread)
         monitor_state['monitor_thread'].daemon = True
         monitor_state['monitor_thread'].start()
@@ -443,6 +696,36 @@ def reset_processed_workflows():
             'message': f"重置处理记录时出错: {str(e)}"
         }), 500
 
+@app.route('/api/check_health', methods=['GET'])
+def check_health():
+    """检查系统健康状态"""
+    # 检查线程健康
+    is_thread_healthy = check_thread_health()
+    # 检查数据库连接健康
+    db_status = check_db_connection_health()
+    
+    # 创建状态响应
+    health_status = {
+        'healthy': is_thread_healthy and db_status['mysql'] and db_status['postgres'],
+        'components': {
+            'monitoring_thread': {
+                'status': 'healthy' if is_thread_healthy else 'unhealthy',
+                'last_heartbeat': monitor_state['thread_heartbeat'].strftime('%Y-%m-%d %H:%M:%S')
+            },
+            'mysql_database': {
+                'status': 'healthy' if db_status['mysql'] else 'unhealthy'
+            },
+            'postgres_database': {
+                'status': 'healthy' if db_status['postgres'] else 'unhealthy'
+            }
+        },
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    http_status = 200 if health_status['healthy'] else 503  # 服务不可用
+    
+    return jsonify(health_status), http_status
+
 @app.route('/', methods=['GET'])
 def home():
     """主页，显示简单的使用说明"""
@@ -489,11 +772,35 @@ def home():
                 'method': 'POST',
                 'description': '重置已处理的workflow_id列表',
                 'curl_example': 'curl -X POST http://localhost:5001/api/monitor/reset'
+            },
+            {
+                'url': '/api/check_health',
+                'method': 'GET',
+                'description': '检查系统健康状态',
+                'curl_example': 'curl http://localhost:5001/api/check_health'
             }
         ]
     }
     
     return jsonify(docs)
 
+# 关闭连接池的函数
+def close_connection_pools():
+    """关闭所有数据库连接池"""
+    try:
+        if 'pg_pool' in globals():
+            pg_pool.closeall()
+            logger.info("PostgreSQL连接池已关闭")
+    except Exception as e:
+        logger.error(f"关闭PostgreSQL连接池时出错: {str(e)}")
+    
+    # MySQL连接池会自动关闭
+
+# 程序退出时关闭连接池
+import atexit
+atexit.register(close_connection_pools)
+
 if __name__ == '__main__':
+    # 启动时执行健康检查
+    check_db_connection_health()
     app.run(debug=True, host='0.0.0.0', port=5001) 
