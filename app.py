@@ -104,17 +104,52 @@ db_health_status = {
     'postgres': True
 }
 
+def get_pool_stats():
+    """获取数据库连接池状态统计"""
+    stats = {
+        'mysql': {
+            'pool_exists': 'mysql_pool' in globals(),
+            'active_connections': 0
+        },
+        'postgres': {
+            'pool_exists': 'pg_pool' in globals(),
+            'active_connections': 0
+        }
+    }
+    
+    # 获取MySQL连接池状态
+    if stats['mysql']['pool_exists']:
+        try:
+            # 注意：这些属性依赖于mysql.connector的实现，可能需要调整
+            if hasattr(mysql_pool, '_cnx_queue'):
+                stats['mysql']['active_connections'] = mysql_pool._cnx_queue.qsize()
+        except:
+            pass
+    
+    # 获取PostgreSQL连接池状态
+    if stats['postgres']['pool_exists']:
+        try:
+            stats['postgres']['active_connections'] = len(pg_pool._used)
+        except:
+            pass
+    
+    return stats
+
 def check_db_connection_health():
-    """定期检查数据库连接健康状态"""
+    """定期检查数据库连接健康状态，并输出连接池统计信息"""
     global last_health_check, db_health_status
     
     # 每10分钟检查一次
     current_time = datetime.now()
     if (current_time - last_health_check).total_seconds() < 600:  # 10分钟
-        return
+        return db_health_status
     
     last_health_check = current_time
     logger.info("执行数据库连接健康检查...")
+    
+    # 获取连接池统计信息
+    pool_stats = get_pool_stats()
+    logger.info(f"连接池状态: MySQL({pool_stats['mysql']['active_connections']}), PostgreSQL({pool_stats['postgres']['active_connections']})")
     
     # 检查MySQL连接
     try:
@@ -149,27 +184,49 @@ def check_db_connection_health():
     return db_health_status
 
 def get_mysql_connection(max_retries=3):
-    """从连接池获取MySQL连接，带重试机制"""
+    """从连接池获取MySQL连接，带重试机制，确保旧连接被正确关闭"""
     retry_count = 0
     last_error = None
+    old_conn = None
     
     while retry_count < max_retries:
         try:
             # 尝试从连接池获取连接
             if 'mysql_pool' in globals():
                 conn = mysql_pool.get_connection()
+                # 标记这是一个池连接
+                setattr(conn, '_is_pooled', True)
+                
+                # 测试连接是否可用
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+                cursor.close()
+                
                 if retry_count > 0:
                     logger.info(f"MySQL连接池重连成功(尝试 {retry_count+1}/{max_retries})")
                 return conn
             else:
                 # 如果连接池不可用，使用普通连接
                 conn = mysql.connector.connect(**MYSQL_CONFIG)
+                setattr(conn, '_is_pooled', False)
+                
                 if retry_count > 0:
                     logger.info(f"MySQL直接连接成功(尝试 {retry_count+1}/{max_retries})")
                 return conn
         except Exception as e:
             retry_count += 1
             last_error = e
+            
+            # 处理上一次尝试的连接对象，确保它被关闭
+            if 'conn' in locals() and conn:
+                try:
+                    if hasattr(conn, 'is_connected') and conn.is_connected():
+                        conn.close()
+                        logger.debug("关闭失败的MySQL连接")
+                except Exception as close_err:
+                    logger.warning(f"关闭失败的MySQL连接出错: {str(close_err)}")
+            
             wait_time = 2 ** retry_count  # 指数退避
             logger.error(f"MySQL连接失败(尝试 {retry_count}/{max_retries}): {str(e)}")
             
@@ -183,18 +240,47 @@ def get_mysql_connection(max_retries=3):
     raise last_error
 
 def release_mysql_connection(conn):
-    """释放MySQL连接回连接池"""
+    """释放MySQL连接回连接池，处理不同类型的连接"""
+    if not conn:
+        return
+        
     try:
-        if conn:
-            # 检查是否是从连接池获取的连接
-            if hasattr(conn, 'close') and hasattr(conn, 'is_connected'):
-                if conn.is_connected():
+        # 检查是否是从连接池获取的连接
+        if hasattr(conn, '_is_pooled') and conn._is_pooled:
+            # 连接池连接
+            try:
+                # 先检查连接是否仍然有效
+                if hasattr(conn, 'is_connected') and conn.is_connected():
+                    # 重置会话状态，保证连接回收后的干净状态
+                    try:
+                        conn.reset_session()
+                    except:
+                        # 如果重置失败，则关闭连接
+                        conn.close()
+                        logger.debug("重置MySQL会话失败，已关闭连接")
+                    else:
+                        # 会话重置成功，正常关闭连接返回池
+                        conn.close()
+                        logger.debug("MySQL连接已重置并返回连接池")
+                else:
+                    # 连接已经断开，尝试关闭
                     conn.close()
+                    logger.warning("释放一个已断开的MySQL连接")
+            except Exception as e:
+                logger.error(f"释放MySQL池连接失败: {str(e)}")
+        else:
+            # 直接创建的连接
+            try:
+                if hasattr(conn, 'is_connected') and conn.is_connected():
+                    conn.close()
+                    logger.debug("关闭MySQL直接连接")
+            except Exception as e:
+                logger.error(f"关闭MySQL直接连接失败: {str(e)}")
     except Exception as e:
-        logger.error(f"释放MySQL连接失败: {str(e)}")
+        logger.error(f"释放MySQL连接时发生未预期的错误: {str(e)}")
 
 def get_pg_connection(max_retries=3):
-    """从连接池获取PostgreSQL连接，带重试机制"""
+    """从连接池获取PostgreSQL连接，带重试机制，确保旧连接被正确关闭"""
     retry_count = 0
     last_error = None
     
@@ -203,18 +289,44 @@ def get_pg_connection(max_retries=3):
             # 尝试从连接池获取连接
             if 'pg_pool' in globals():
                 conn = pg_pool.getconn()
+                # 标记这是一个池连接
+                setattr(conn, '_is_pooled', True)
+                
+                # 测试连接是否可用
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+                cursor.close()
+                
                 if retry_count > 0:
                     logger.info(f"PostgreSQL连接池重连成功(尝试 {retry_count+1}/{max_retries})")
                 return conn
             else:
                 # 如果连接池不可用，使用普通连接
                 conn = psycopg2.connect(**PG_CONFIG)
+                setattr(conn, '_is_pooled', False)
+                
                 if retry_count > 0:
                     logger.info(f"PostgreSQL直接连接成功(尝试 {retry_count+1}/{max_retries})")
                 return conn
         except Exception as e:
             retry_count += 1
             last_error = e
+            
+            # 处理上一次尝试的连接对象，确保它被关闭
+            if 'conn' in locals() and conn:
+                try:
+                    if not conn.closed:
+                        if hasattr(conn, '_is_pooled') and conn._is_pooled and 'pg_pool' in globals():
+                            # 将损坏的连接标记为有问题，这样连接池会丢弃它
+                            conn.close()
+                            logger.debug("关闭失败的PostgreSQL池连接")
+                        else:
+                            conn.close()
+                            logger.debug("关闭失败的PostgreSQL直接连接")
+                except Exception as close_err:
+                    logger.warning(f"关闭失败的PostgreSQL连接出错: {str(close_err)}")
+            
             wait_time = 2 ** retry_count  # 指数退避
             logger.error(f"PostgreSQL连接失败(尝试 {retry_count}/{max_retries}): {str(e)}")
             
@@ -228,17 +340,51 @@ def get_pg_connection(max_retries=3):
     raise last_error
 
 def release_pg_connection(conn):
-    """释放PostgreSQL连接回连接池"""
+    """释放PostgreSQL连接回连接池，处理不同类型的连接"""
+    if not conn:
+        return
+        
     try:
-        if conn:
-            # 检查是否是从连接池获取的连接
+        # 检查是否是从连接池获取的连接
+        if hasattr(conn, '_is_pooled') and conn._is_pooled:
+            # 池连接
             if 'pg_pool' in globals():
-                pg_pool.putconn(conn)
+                try:
+                    # 尝试测试连接是否仍然可用
+                    if not conn.closed:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT 1")
+                        cursor.close()
+                        # 连接有效，将其返回池
+                        pg_pool.putconn(conn)
+                        logger.debug("PostgreSQL连接已返回连接池")
+                    else:
+                        # 连接已关闭，不返回池
+                        logger.warning("尝试释放已关闭的PostgreSQL连接")
+                except Exception as e:
+                    # 连接有问题，关闭它而不是返回池
+                    try:
+                        if not conn.closed:
+                            conn.close()
+                        logger.warning(f"PostgreSQL连接有问题，已关闭而非返回池: {str(e)}")
+                    except:
+                        logger.error("关闭问题PostgreSQL连接失败")
             else:
+                try:
+                    if not conn.closed:
+                        conn.close()
+                except Exception as e:
+                    logger.error(f"关闭PostgreSQL连接失败: {str(e)}")
+        else:
+            # 直接创建的连接
+            try:
                 if not conn.closed:
                     conn.close()
+                    logger.debug("关闭PostgreSQL直接连接")
+            except Exception as e:
+                logger.error(f"关闭PostgreSQL直接连接失败: {str(e)}")
     except Exception as e:
-        logger.error(f"释放PostgreSQL连接失败: {str(e)}")
+        logger.error(f"释放PostgreSQL连接时发生未预期的错误: {str(e)}")
 
 app = Flask(__name__)
 
@@ -786,15 +932,33 @@ def home():
 
 # 关闭连接池的函数
 def close_connection_pools():
-    """关闭所有数据库连接池"""
+    """关闭所有数据库连接池，确保所有连接被正确释放"""
     try:
+        # 关闭PostgreSQL连接池
         if 'pg_pool' in globals():
+            # 获取连接池统计信息
+            try:
+                used_conns = len(pg_pool._used) if hasattr(pg_pool, '_used') else 'unknown'
+                logger.info(f"关闭PostgreSQL连接池前状态: 使用中连接 {used_conns}")
+            except:
+                pass
+                
+            # 关闭连接池
             pg_pool.closeall()
             logger.info("PostgreSQL连接池已关闭")
+            
+        # 关闭MySQL连接池
+        # MySQL连接池通常会自动关闭，但我们可以尝试释放所有连接
+        if 'mysql_pool' in globals():
+            try:
+                # 尝试获取连接池统计信息
+                logger.info("正在关闭MySQL连接池")
+                # 注意：mysql.connector可能没有提供直接关闭池的方法
+                # 此处依赖垃圾回收机制
+            except Exception as e:
+                logger.error(f"在关闭MySQL连接池时遇到问题: {str(e)}")
     except Exception as e:
-        logger.error(f"关闭PostgreSQL连接池时出错: {str(e)}")
-    
-    # MySQL连接池会自动关闭
+        logger.error(f"关闭数据库连接池时出错: {str(e)}")
 
 # 程序退出时关闭连接池
 import atexit
