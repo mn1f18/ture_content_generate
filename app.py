@@ -110,8 +110,8 @@ def initialize_connection_pools(max_retries=3):
             pg_pool_config = PG_CONFIG.copy()
             # 创建PostgreSQL连接池
             globals()['pg_pool'] = psycopg2.pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=10,  # 增加最大连接数
+                minconn=3,  # 增加最小连接数
+                maxconn=20,  # 增加最大连接数
                 user=pg_pool_config['user'],
                 password=pg_pool_config['password'],
                 host=pg_pool_config['host'],
@@ -195,7 +195,7 @@ def check_db_connection_health():
     logger.info(f"连接池状态: MySQL({pool_stats['mysql']['active_connections']}), PostgreSQL({pool_stats['postgres']['active_connections']})")
     
     # 检查是否需要重置PostgreSQL连接池
-    if 'pg_pool' in globals() and pool_stats['postgres']['active_connections'] >= 3:
+    if 'pg_pool' in globals() and pool_stats['postgres']['active_connections'] >= 12:  # 将阈值从3调整为12
         logger.warning("PostgreSQL连接池使用率较高，执行紧急重置")
         emergency_pg_pool_reset()
     
@@ -506,8 +506,8 @@ def emergency_pg_pool_reset():
             try:
                 pg_pool_config = PG_CONFIG.copy()
                 globals()['pg_pool'] = psycopg2.pool.ThreadedConnectionPool(
-                    minconn=1,
-                    maxconn=10,  # 增加最大连接数
+                    minconn=3,  # 增加最小连接数
+                    maxconn=20,  # 增加最大连接数
                     user=pg_pool_config['user'],
                     password=pg_pool_config['password'],
                     host=pg_pool_config['host'],
