@@ -77,7 +77,6 @@ def get_deduplicated_link_ids(workflow_id, max_retries=3):
             query = """
             SELECT link_id FROM true_content_prepare 
             WHERE workflow_id = %s
-            ORDER BY score DESC
             """
             
             cursor.execute(query, (workflow_id,))
