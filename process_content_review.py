@@ -15,14 +15,17 @@ from datetime import datetime
 # 导入dashscope - 修改导入方式适应新版API
 try:
     from dashscope import Generation
-    use_generation_api = True
+    from dashscope import Application
+    from http import HTTPStatus
+    use_new_api = True
 except ImportError:
     try:
         from dashscope import Application
-        use_generation_api = False
+        from http import HTTPStatus
+        use_new_api = True
     except ImportError:
         from dashscope.api import call
-        use_generation_api = False
+        use_new_api = False
         print("使用基础dashscope.api.call方法")
 
 # 配置日志
@@ -209,47 +212,31 @@ def call_ali_agent(original_content, is_english=False):
             logger.error(f"阿里智能体API密钥或应用ID未配置，无法处理{'英文' if is_english else '中文'}内容")
             return None
         
-        # 准备输入数据
-        input_text = json.dumps(original_content, ensure_ascii=False)
-        
-        # 使用不同的API调用方式
-        if use_generation_api:
-            response = Generation.call(
-                model=app_id,
-                api_key=DASHSCOPE_API_KEY,
-                prompt=input_text
-            )
-            if response.status_code == 200:
-                result = response.output.text
+        # 准备输入数据 - 处理日期类型
+        # 深拷贝原始内容，避免修改原始数据
+        processed_content = {}
+        for key, value in original_content.items():
+            # 正确检查日期类型
+            if hasattr(value, 'isoformat') and callable(getattr(value, 'isoformat')):
+                processed_content[key] = value.isoformat()
             else:
-                logger.error(f"调用阿里智能体失败: {response.message}")
-                return None
+                processed_content[key] = value
+        
+        # 准备输入数据
+        input_text = json.dumps(processed_content, ensure_ascii=False, default=str)
+        
+        # 使用Application.call方法，与test_simple.py保持一致
+        response = Application.call(
+            api_key=DASHSCOPE_API_KEY,
+            app_id=app_id,
+            prompt=input_text
+        )
+        
+        if response.status_code == HTTPStatus.OK:
+            result = response.output.text
         else:
-            try:
-                # 尝试使用Application类
-                response = Application.call(
-                    api_key=DASHSCOPE_API_KEY,
-                    app_id=app_id,
-                    prompt=input_text
-                )
-                if response.get('code') == 'success':
-                    result = response.get('output', {}).get('text')
-                else:
-                    logger.error(f"调用阿里智能体失败: {response.get('message', '未知错误')}")
-                    return None
-            except NameError:
-                # 使用基础call方法
-                response = call(
-                    'aigc',
-                    api_key=DASHSCOPE_API_KEY,
-                    app_id=app_id,
-                    prompt=input_text
-                )
-                if response.get('code') == 'success':
-                    result = response.get('output', {}).get('text')
-                else:
-                    logger.error(f"调用阿里智能体失败: {response.get('message', '未知错误')}")
-                    return None
+            logger.error(f"调用阿里智能体失败: {response.message}")
+            return None
         
         # 提取JSON结果
         try:
@@ -327,6 +314,12 @@ def save_to_true_content(review_result, original_data, is_english=False, max_ret
     table_name = "true_content_en" if is_english else "true_content"
     retry_count = 0
     
+    # 处理响应格式 - 检查是否有review_result包装
+    if isinstance(review_result, dict) and 'review_result' in review_result:
+        review_data = review_result['review_result']
+    else:
+        review_data = review_result
+    
     while retry_count < max_retries:
         conn = None
         try:
@@ -368,15 +361,15 @@ def save_to_true_content(review_result, original_data, is_english=False, max_ret
             
             # 从审核结果中获取优化后的字段
             link_id = original_data["link_id"]
-            title = review_result.get("title", original_data["title"])
-            content = review_result.get("content", original_data["content"])
-            event_tags = json.dumps(review_result.get("event_tags", []), ensure_ascii=False)
-            space_tags = json.dumps(review_result.get("space_tags", []), ensure_ascii=False)
-            impact_factors = json.dumps(review_result.get("impact_factors", []), ensure_ascii=False)
-            cat_tags = json.dumps(review_result.get("cat_tags", []), ensure_ascii=False)
-            importance_score = review_result.get("importance_score", 0.3)
-            status = review_result.get("status", "未通过" if not is_english else "Rejected")
-            review_note = review_result.get("review_note", "")
+            title = review_data.get("title", original_data["title"])
+            content = review_data.get("content", original_data["content"])
+            event_tags = json.dumps(review_data.get("event_tags", []), ensure_ascii=False)
+            space_tags = json.dumps(review_data.get("space_tags", []), ensure_ascii=False)
+            impact_factors = json.dumps(review_data.get("impact_factors", []), ensure_ascii=False)
+            cat_tags = json.dumps(review_data.get("cat_tags", []), ensure_ascii=False)
+            importance_score = review_data.get("importance_score", 0.3)
+            status = review_data.get("status", "未通过" if not is_english else "Rejected")
+            review_note = review_data.get("review_note", "")
             
             # 执行插入操作
             cursor.execute(insert_query, (
