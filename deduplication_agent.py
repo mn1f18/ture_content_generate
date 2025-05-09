@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import mysql.connector
 import psycopg2
 import json
@@ -8,7 +11,6 @@ import argparse
 from datetime import datetime
 from dotenv import load_dotenv
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
-from dashscope import Application
 from logging.handlers import RotatingFileHandler
 
 # 加载环境变量
@@ -61,6 +63,19 @@ PG_CONFIG = {
 # 阿里智能体配置
 ALI_AGENT_APP_ID = os.getenv('ALI_AGENT_APP_ID')
 DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY')
+
+# 导入dashscope - 修改导入方式适应新版API
+try:
+    from dashscope import Generation
+    use_generation_api = True
+except ImportError:
+    try:
+        from dashscope import Application
+        use_generation_api = False
+    except ImportError:
+        from dashscope.api import call
+        use_generation_api = False
+        print("使用基础dashscope.api.call方法")
 
 def get_latest_workflow_id():
     """获取最新的workflow_id"""
@@ -116,100 +131,95 @@ def get_news_by_workflow(workflow_id):
     return news_items
 
 def extract_json_from_text(text):
-    """从文本中提取JSON内容，支持处理带有Markdown代码块格式的JSON"""
-    try:
-        # 检查是否是Markdown格式的JSON代码块
-        if "```json" in text:
-            # 移除Markdown代码块标记
-            start = text.find("```json") + 7  # 7是```json的长度
-            end = text.rfind("```")
-            if end > start:  # 确保找到了结束标记
-                json_str = text[start:end].strip()
-                return json.loads(json_str)
-            
-        # 如果不是Markdown格式，尝试常规提取
-        start = text.find('{')
-        end = text.rfind('}')
-        if start != -1 and end != -1:
-            json_str = text[start:end+1]
-            return json.loads(json_str)
+    """从文本中提取JSON部分"""
+    import re
+    
+    # 尝试提取 {} 闭合的部分
+    if not text:
+        return None
         
-        # 如果以上方法都失败，尝试直接解析整个文本
-        return json.loads(text)
-            
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON解析失败: {str(e)}, 文本: {text[:200]}...")
-        # 尝试清理文本后再解析
+    # 尝试多种JSON提取方法
+    json_pattern = r'({[\s\S]*})'
+    matches = re.findall(json_pattern, text)
+    
+    for match in matches:
         try:
-            # 移除可能的非JSON字符
-            clean_text = ''.join(c for c in text if c in '{}[]()":,0123456789.abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_ -\n\t')
-            start = clean_text.find('{')
-            end = clean_text.rfind('}')
-            if start != -1 and end != -1:
-                json_str = clean_text[start:end+1]
-                return json.loads(json_str)
+            # 尝试解析这个匹配的片段
+            test_json = json.loads(match)
+            # 如果能解析成功并包含目标字段，则返回
+            if 'selected_news' in test_json:
+                return match
         except:
-            pass
-        return None
+            continue
+    
+    # 如果未找到有效的JSON字符串，记录错误并返回None
+    logger.warning(f"无法从文本中提取有效的JSON: {text[:200]}...")
+    return None
 
-def call_ali_agent(news_data):
-    """调用阿里智能体进行去重分析"""
-    if not DASHSCOPE_API_KEY or not ALI_AGENT_APP_ID:
-        logger.error("阿里智能体API密钥或应用ID未配置，无法进行去重处理")
-        return None
+def get_deduplicated_news_ids(news_list):
+    """调用阿里去重智能体获取去重结果
     
+    Args:
+        news_list: 原始新闻列表
+        
+    Returns:
+        selected_news: 去重后保留的新闻ID列表
+    """
     # 准备输入数据
-    news_list = []
-    for news in news_data:
-        news_list.append({
-            'link_id': news['link_id'],
-            'title': news['title'],
-            'event_tags': news['event_tags']
-        })
+    input_data = {
+        "news_list": news_list
+    }
     
-    # 将新闻列表转换为JSON字符串
-    input_data = json.dumps({"news_list": news_list}, ensure_ascii=False)
+    logger.info(f"调用阿里智能体进行新闻去重，共 {len(news_list)} 条")
     
     try:
-        logger.info(f"开始调用阿里智能体，新闻数量: {len(news_list)}")
-        
-        # 调用阿里百炼应用
-        response = Application.call(
-            api_key=DASHSCOPE_API_KEY,
-            app_id=ALI_AGENT_APP_ID,
-            prompt=input_data
-        )
-        
-        if response.status_code == 200:
-            logger.info("阿里智能体调用成功")
-            # 从响应中提取JSON
-            result = extract_json_from_text(response.output.text)
-            if result:
-                # 验证结果是否包含必要的字段
-                if 'selected_news' in result:
-                    selected_count = len(result['selected_news'])
-                    logger.info(f"解析成功: 智能体选中了{selected_count}条不重复的新闻（共{len(news_list)}条）")
-                    return result
-                else:
-                    logger.error("解析的JSON结果缺少selected_news字段")
-                    logger.debug(f"解析结果: {json.dumps(result, ensure_ascii=False)[:500]}...")
-                    return None
+        # 使用不同的API调用方式
+        if use_generation_api:
+            response = Generation.call(
+                model=ALI_AGENT_APP_ID,
+                api_key=DASHSCOPE_API_KEY,
+                prompt=json.dumps(input_data, ensure_ascii=False)
+            )
+            if response.status_code == 200:
+                result = response.output.text
             else:
-                logger.error(f"无法从响应中提取JSON: {response.output.text[:500]}...")
-                # 尝试保存原始响应以便调试
-                try:
-                    with open(f"agent_response_{datetime.now().strftime('%Y%m%d%H%M%S')}.txt", "w", encoding="utf-8") as f:
-                        f.write(response.output.text)
-                    logger.info("已保存原始响应到文件中")
-                except Exception as e:
-                    logger.error(f"保存响应失败: {str(e)}")
+                logger.error(f"调用阿里智能体失败: {response.message}")
                 return None
         else:
-            logger.error(f"阿里智能体调用失败: 状态码={response.status_code}, 消息={response.message}")
-            return None
-            
+            try:
+                # 尝试使用Application类
+                response = Application.call(
+                    api_key=DASHSCOPE_API_KEY,
+                    app_id=ALI_AGENT_APP_ID,
+                    prompt=json.dumps(input_data, ensure_ascii=False)
+                )
+                if response['code'] == 'success':
+                    result = response['output']['text']
+                else:
+                    logger.error(f"调用阿里智能体失败: {response.get('message', '未知错误')}")
+                    return None
+            except NameError:
+                # 使用基础call方法
+                response = call(
+                    'aigc',
+                    api_key=DASHSCOPE_API_KEY,
+                    app_id=ALI_AGENT_APP_ID,
+                    prompt=json.dumps(input_data, ensure_ascii=False)
+                )
+                if response['code'] == 'success':
+                    result = response['output']['text']
+                else:
+                    logger.error(f"调用阿里智能体失败: {response.get('message', '未知错误')}")
+                    return None
+        
+        # 提取JSON结果
+        selected_news = extract_selected_news(result)
+        
+        logger.info(f"阿里智能体去重完成，保留 {len(selected_news) if selected_news else 0} 条")
+        return selected_news
+        
     except Exception as e:
-        logger.error(f"调用阿里智能体时出错: {str(e)}")
+        logger.error(f"调用阿里智能体过程中发生错误: {str(e)}")
         return None
 
 def save_to_postgres(dedup_result, workflow_id):
@@ -324,7 +334,7 @@ def process_workflow(workflow_id=None):
         logger.info(f"获取到 {len(news_data)} 条新闻，准备进行去重处理")
         
         # 调用阿里智能体进行去重
-        dedup_result = call_ali_agent(news_data)
+        dedup_result = get_deduplicated_news_ids(news_data)
         if not dedup_result:
             logger.error("调用智能体失败，无法完成去重")
             return False
@@ -338,6 +348,66 @@ def process_workflow(workflow_id=None):
     except Exception as e:
         logger.error(f"处理workflow过程中出现异常: {str(e)}")
         return False
+
+def extract_selected_news(text):
+    """从智能体响应中提取选中的新闻ID列表
+    
+    Args:
+        text: 智能体响应文本
+        
+    Returns:
+        list: 选中的新闻ID列表
+    """
+    try:
+        # 尝试直接解析
+        if isinstance(text, str):
+            try:
+                result = json.loads(text)
+            except json.JSONDecodeError:
+                # 尝试从文本中提取JSON部分
+                text = extract_json_from_text(text)
+                if text:
+                    result = json.loads(text)
+                else:
+                    logger.error("无法从响应中提取JSON")
+                    return None
+        else:
+            result = text  # 已经是JSON对象
+        
+        # 验证结果格式
+        if 'selected_news' in result:
+            return result['selected_news']
+        else:
+            logger.error("响应中没有selected_news字段")
+            logger.debug(f"响应内容: {json.dumps(result, ensure_ascii=False)[:500]}...")
+            return None
+    except Exception as e:
+        logger.error(f"解析智能体响应时出错: {str(e)}")
+        return None
+
+def call_ali_agent(news_data):
+    """调用阿里智能体进行去重分析"""
+    if not DASHSCOPE_API_KEY or not ALI_AGENT_APP_ID:
+        logger.error("阿里智能体API密钥或应用ID未配置，无法进行去重处理")
+        return None
+    
+    # 准备输入数据
+    news_list = []
+    for news in news_data:
+        news_list.append({
+            'link_id': news['link_id'],
+            'title': news['title'],
+            'event_tags': news['event_tags']
+        })
+    
+    # 调用通用函数获取去重结果
+    result = get_deduplicated_news_ids(news_list)
+    
+    if result:
+        # 构建完整的返回结果格式
+        return {'selected_news': result}
+    else:
+        return None
 
 def main():
     """主函数"""

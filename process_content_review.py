@@ -11,7 +11,19 @@ import requests
 from dotenv import load_dotenv
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
-from dashscope import Application  # 添加import
+
+# 导入dashscope - 修改导入方式适应新版API
+try:
+    from dashscope import Generation
+    use_generation_api = True
+except ImportError:
+    try:
+        from dashscope import Application
+        use_generation_api = False
+    except ImportError:
+        from dashscope.api import call
+        use_generation_api = False
+        print("使用基础dashscope.api.call方法")
 
 # 配置日志
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -179,87 +191,91 @@ def get_original_content(link_id, max_retries=3):
     logger.error(f"获取link_id为{link_id}的原始内容失败，已达到最大重试次数")
     return None
 
-def call_ali_agent(article_data, is_english=False):
+def call_ali_agent(original_content, is_english=False):
+    """调用阿里智能体进行内容审核和优化
+    
+    Args:
+        original_content: 原始内容 
+        is_english: 是否调用英文版智能体
+        
+    Returns:
+        dict: 审核结果
     """
-    调用阿里云智能体进行内容审核和优化
-    
-    参数:
-    - article_data: 文章数据字典
-    - is_english: 是否调用英文智能体
-    """
-    if not DASHSCOPE_API_KEY:
-        logger.error("阿里智能体API密钥未配置，无法进行内容审核")
-        return None
-    
-    # 根据是否英文选择不同的应用ID
-    app_id = ALI_AGENT_CONTENT_EN_APP_ID if is_english else ALI_AGENT_CONTENT_APP_ID
-    agent_type = "英文" if is_english else "中文"
-    
-    if not app_id:
-        logger.error(f"阿里{agent_type}智能体应用ID未配置，无法进行内容审核")
-        return None
-    
-    # 准备输入数据
-    input_data = json.dumps({
-        "article": {
-            "link_id": article_data["link_id"],
-            "title": article_data["title"],
-            "content": article_data["content"],
-            "event_tags": article_data["event_tags"],
-            "space_tags": article_data["space_tags"],
-            "cat_tags": article_data["cat_tags"],
-            "impact_factors": article_data["impact_factors"]
-        }
-    }, ensure_ascii=False)
-    
-    max_retries = 3
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        try:
-            logger.info(f"开始调用阿里{agent_type}智能体进行内容审核，link_id: {article_data['link_id']}")
-            
-            # 调用阿里百炼应用，与deduplication_agent.py保持一致
-            response = Application.call(
+    try:
+        # 根据是否是英文选择不同的应用ID
+        app_id = ALI_AGENT_CONTENT_EN_APP_ID if is_english else ALI_AGENT_CONTENT_APP_ID
+        
+        if not DASHSCOPE_API_KEY or not app_id:
+            logger.error(f"阿里智能体API密钥或应用ID未配置，无法处理{'英文' if is_english else '中文'}内容")
+            return None
+        
+        # 准备输入数据
+        input_text = json.dumps(original_content, ensure_ascii=False)
+        
+        # 使用不同的API调用方式
+        if use_generation_api:
+            response = Generation.call(
+                model=app_id,
                 api_key=DASHSCOPE_API_KEY,
-                app_id=app_id,
-                prompt=input_data
+                prompt=input_text
             )
-            
             if response.status_code == 200:
-                logger.info(f"阿里{agent_type}智能体调用成功，link_id: {article_data['link_id']}")
-                
-                # 从响应中提取JSON
-                try:
-                    # 先尝试从text中提取JSON
-                    if hasattr(response.output, 'text'):
-                        result_text = response.output.text
-                        # 查找JSON部分
-                        result = extract_json_from_text(result_text)
-                        if result and 'review_result' in result:
-                            return result['review_result']
-                    # 如果不存在text属性，尝试直接获取
-                    if hasattr(response, 'output'):
-                        if isinstance(response.output, dict):
-                            return response.output.get('review_result')
-                    
-                    logger.error(f"找不到review_result字段，响应格式不正确: {str(response)[:500]}...")
-                    return None
-                except Exception as e:
-                    logger.error(f"解析响应时出错: {str(e)}")
-                    return None
+                result = response.output.text
             else:
-                logger.error(f"阿里{agent_type}智能体调用失败: 状态码={response.status_code}, 消息={response.message}")
-                retry_count += 1
-                time.sleep(2)  # 等待2秒后重试
-                
+                logger.error(f"调用阿里智能体失败: {response.message}")
+                return None
+        else:
+            try:
+                # 尝试使用Application类
+                response = Application.call(
+                    api_key=DASHSCOPE_API_KEY,
+                    app_id=app_id,
+                    prompt=input_text
+                )
+                if response.get('code') == 'success':
+                    result = response.get('output', {}).get('text')
+                else:
+                    logger.error(f"调用阿里智能体失败: {response.get('message', '未知错误')}")
+                    return None
+            except NameError:
+                # 使用基础call方法
+                response = call(
+                    'aigc',
+                    api_key=DASHSCOPE_API_KEY,
+                    app_id=app_id,
+                    prompt=input_text
+                )
+                if response.get('code') == 'success':
+                    result = response.get('output', {}).get('text')
+                else:
+                    logger.error(f"调用阿里智能体失败: {response.get('message', '未知错误')}")
+                    return None
+        
+        # 提取JSON结果
+        try:
+            if isinstance(result, str):
+                # 尝试直接解析
+                try:
+                    return json.loads(result)
+                except json.JSONDecodeError:
+                    # 尝试提取JSON部分
+                    logger.debug(f"尝试从结果中提取JSON: {result[:200]}...")
+                    json_match = extract_json_from_text(result)
+                    if json_match:
+                        return json.loads(json_match)
+                    else:
+                        logger.error("无法从结果中提取JSON")
+                        return None
+            else:
+                # 已经是JSON对象
+                return result
         except Exception as e:
-            logger.error(f"调用阿里{agent_type}智能体时出错: {str(e)}")
-            retry_count += 1
-            time.sleep(2)  # 等待2秒后重试
-    
-    logger.error(f"调用阿里{agent_type}智能体失败，已达到最大重试次数")
-    return None
+            logger.error(f"解析阿里智能体响应时出错: {str(e)}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"调用阿里智能体时出错: {str(e)}")
+        return None
 
 def extract_json_from_text(text):
     """从文本中提取JSON内容，支持处理带有Markdown代码块格式的JSON"""
@@ -271,17 +287,17 @@ def extract_json_from_text(text):
             end = text.rfind("```")
             if end > start:  # 确保找到了结束标记
                 json_str = text[start:end].strip()
-                return json.loads(json_str)
+                return json_str
             
         # 如果不是Markdown格式，尝试常规提取
         start = text.find('{')
         end = text.rfind('}')
         if start != -1 and end != -1:
             json_str = text[start:end+1]
-            return json.loads(json_str)
+            return json_str
         
         # 如果以上方法都失败，尝试直接解析整个文本
-        return json.loads(text)
+        return text
             
     except json.JSONDecodeError as e:
         logger.error(f"JSON解析失败: {str(e)}, 文本: {text[:200]}...")
@@ -293,7 +309,7 @@ def extract_json_from_text(text):
             end = clean_text.rfind('}')
             if start != -1 and end != -1:
                 json_str = clean_text[start:end+1]
-                return json.loads(json_str)
+                return json_str
         except:
             pass
         return None
@@ -549,6 +565,62 @@ def add_content_review_to_monitor():
     """
     logger.info("已创建content_review处理模块，请将其集成到app.py的监控线程中")
     logger.info("在处理workflow后，添加调用process_content_review(current_workflow_id)的逻辑")
+
+def process_single_article(article_data):
+    """处理单篇文章，调用智能体进行内容优化"""
+    if not article_data:
+        logger.error("文章数据为空，无法处理")
+        return False
+    
+    link_id = article_data.get('link_id')
+    if not link_id:
+        logger.error("文章缺少link_id，无法处理")
+        return False
+    
+    logger.info(f"开始处理文章 link_id: {link_id}")
+    
+    try:
+        # 准备输入数据
+        input_data = {
+            "article": {
+                "link_id": article_data["link_id"],
+                "title": article_data["title"],
+                "content": article_data["content"],
+                "event_tags": article_data["event_tags"],
+                "space_tags": article_data["space_tags"],
+                "cat_tags": article_data["cat_tags"],
+                "impact_factors": article_data["impact_factors"]
+            }
+        }
+        
+        # 调用中文内容审核
+        logger.info(f"调用中文内容审核智能体，link_id: {link_id}")
+        zh_result = call_ali_agent(input_data, is_english=False)
+        
+        if not zh_result or not isinstance(zh_result, dict):
+            logger.error(f"中文内容审核失败或结果格式错误，link_id: {link_id}")
+            return False
+        
+        # 调用英文内容审核
+        logger.info(f"调用英文内容审核智能体，link_id: {link_id}")
+        en_result = call_ali_agent(input_data, is_english=True)
+        
+        if not en_result or not isinstance(en_result, dict):
+            logger.error(f"英文内容审核失败或结果格式错误，link_id: {link_id}")
+            return False
+        
+        # 保存结果到数据库
+        success = save_to_true_content(zh_result, en_result, article_data['workflow_id'])
+        if success:
+            logger.info(f"成功处理并保存文章 link_id: {link_id}")
+            return True
+        else:
+            logger.error(f"保存结果到数据库失败，link_id: {link_id}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"处理文章出错 link_id: {link_id}, 错误: {str(e)}")
+        return False
 
 if __name__ == "__main__":
     # 测试单个workflow的处理
