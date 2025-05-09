@@ -27,6 +27,7 @@ env/
 
 # 日志文件
 *.log
+*.log.*
 
 # 本地环境配置
 .env
@@ -40,4 +41,9 @@ env/
 # 其他不需要提交的文件
 *.bak
 *.tmp
-*~ 
+*~
+
+# Docker相关
+.dockerenv
+*.dockerignore
+.docker/ 

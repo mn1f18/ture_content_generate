@@ -8,17 +8,26 @@ import time
 from dotenv import load_dotenv
 from datetime import datetime
 from process_content_review import process_content_review
+from logging.handlers import RotatingFileHandler
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("test_content_review.log", encoding="utf-8")
-    ]
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+log_handler = RotatingFileHandler(
+    "app.log", 
+    maxBytes=5*1024*1024,  # 5MB
+    backupCount=2,
+    encoding='utf-8'
 )
+log_handler.setFormatter(log_formatter)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if logger.handlers:
+    logger.handlers.clear()
+logger.addHandler(log_handler)
+logger.addHandler(console_handler)
 
 # 加载环境变量
 load_dotenv()

@@ -16,9 +16,9 @@ from dashscope import Application  # 添加import
 # 配置日志
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 log_handler = RotatingFileHandler(
-    "content_review.log", 
+    "app.log", 
     maxBytes=5*1024*1024,  # 5MB
-    backupCount=3,
+    backupCount=2,
     encoding='utf-8'
 )
 log_handler.setFormatter(log_formatter)

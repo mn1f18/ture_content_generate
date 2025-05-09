@@ -1,0 +1,25 @@
+version: '3'
+
+services:
+  true_content:
+    build: .
+    container_name: true_content
+    restart: always
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./app.log:/app/app.log
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/api/check_health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    external: true 

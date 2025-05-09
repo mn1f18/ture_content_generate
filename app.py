@@ -25,8 +25,8 @@ load_dotenv()
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 log_handler = RotatingFileHandler(
     "app.log", 
-    maxBytes=10*1024*1024,  # 10MB
-    backupCount=5,
+    maxBytes=5*1024*1024,  # 5MB
+    backupCount=2,
     encoding='utf-8'
 )
 log_handler.setFormatter(log_formatter)
@@ -984,33 +984,30 @@ def reset_processed_workflows():
 
 @app.route('/api/check_health', methods=['GET'])
 def check_health():
-    """检查系统健康状态"""
-    # 检查线程健康
-    is_thread_healthy = check_thread_health()
-    # 检查数据库连接健康
-    db_status = check_db_connection_health()
-    
-    # 创建状态响应
-    health_status = {
-        'healthy': is_thread_healthy and db_status['mysql'] and db_status['postgres'],
-        'components': {
-            'monitoring_thread': {
-                'status': 'healthy' if is_thread_healthy else 'unhealthy',
-                'last_heartbeat': monitor_state['thread_heartbeat'].strftime('%Y-%m-%d %H:%M:%S')
-            },
-            'mysql_database': {
-                'status': 'healthy' if db_status['mysql'] else 'unhealthy'
-            },
-            'postgres_database': {
-                'status': 'healthy' if db_status['postgres'] else 'unhealthy'
-            }
-        },
-        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
-    
-    http_status = 200 if health_status['healthy'] else 503  # 服务不可用
-    
-    return jsonify(health_status), http_status
+    """
+    健康检查接口，用于Docker容器健康监控
+    """
+    try:
+        # 检查MySQL连接
+        cnx = mysql_pool.get_connection()
+        cnx.close()
+        
+        # 检查PostgreSQL连接
+        pg_conn = pg_pool.getconn()
+        pg_pool.putconn(pg_conn)
+        
+        return jsonify({
+            "status": "online",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "message": "服务正常运行"
+        }), 200
+    except Exception as e:
+        logging.error(f"健康检查失败: {e}")
+        return jsonify({
+            "status": "error",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "message": f"服务异常: {str(e)}"
+        }), 500
 
 @app.route('/', methods=['GET'])
 def home():

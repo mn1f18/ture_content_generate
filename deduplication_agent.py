@@ -17,9 +17,9 @@ load_dotenv()
 # 配置日志
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 log_handler = RotatingFileHandler(
-    "deduplication.log", 
-    maxBytes=10*1024*1024,  # 10MB
-    backupCount=5,
+    "app.log", 
+    maxBytes=5*1024*1024,  # 5MB
+    backupCount=2,
     encoding='utf-8'
 )
 log_handler.setFormatter(log_formatter)
