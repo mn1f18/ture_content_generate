@@ -17,4 +17,4 @@ COPY .env .
 EXPOSE 5001
 
 # 启动应用
-CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--timeout", "120", "--workers", "2", "app:app"] 
+CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--timeout", "300", "--workers", "2", "app:app"] 
