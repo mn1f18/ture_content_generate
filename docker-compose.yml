@@ -11,6 +11,8 @@ services:
       - ./logs:/app/logs
     env_file:
       - .env
+    environment:
+      - TZ=Asia/Shanghai
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5001/api/check_health"]
       interval: 30s
