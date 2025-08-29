@@ -602,7 +602,20 @@ def get_news_count_by_workflow(workflow_id, max_retries=3):
         FROM news_content.step3_content 
         WHERE workflow_id = %s
         AND state LIKE '%爬取成功%'
-        AND importance IN ('高', '中')
+        AND (
+            -- 中文
+            importance IN ('高', '中') 
+            -- 葡萄牙语
+            OR importance IN ('Alta', 'alto', 'média', 'medio')
+            -- 西班牙语
+            OR importance IN ('alta', 'medio', 'media')
+            -- 英语
+            OR importance IN ('high', 'medium')
+            -- 德语
+            OR importance IN ('hoch', 'mittel')
+            -- 忽略大小写的情况
+            OR LOWER(importance) IN ('high', 'medium', 'alta', 'medio', 'media', 'alto', 'média', 'hoch', 'mittel')
+        )
         """
         
         cursor.execute(query, (workflow_id,))
