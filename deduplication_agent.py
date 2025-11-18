@@ -290,8 +290,13 @@ def workflow_exists_in_pg(workflow_id):
         # 抛出异常，确保数据库连接失败时不会继续处理
         raise Exception(f"无法检查workflow_id是否存在: {str(e)}")
 
-def process_workflow(workflow_id=None):
-    """处理指定工作流程，如果未指定则处理最新的工作流程"""
+def process_workflow(workflow_id=None, batch_size=30):
+    """处理指定工作流程，如果未指定则处理最新的工作流程
+    
+    Args:
+        workflow_id: 工作流ID，如果为None则处理最新的
+        batch_size: 每批处理的新闻数量，默认30条
+    """
     # 如果未指定workflow_id，获取最新的
     if not workflow_id:
         workflow_id = get_latest_workflow_id()
@@ -299,7 +304,7 @@ def process_workflow(workflow_id=None):
             logger.warning("未找到有效的workflow_id")
             return False
     
-    logger.info(f"开始处理workflow_id: {workflow_id}")
+    logger.info(f"开始处理workflow_id: {workflow_id}，分批大小: {batch_size}")
     
     try:
         # 首先检查是否已经处理过，避免重复处理
@@ -313,16 +318,67 @@ def process_workflow(workflow_id=None):
             logger.warning(f"workflow_id {workflow_id} 没有找到任何符合条件的新闻")
             return False
         
-        logger.info(f"获取到 {len(news_data)} 条新闻，准备进行去重处理")
+        total_news = len(news_data)
+        logger.info(f"获取到 {total_news} 条新闻，准备分批进行去重处理（每批{batch_size}条）")
         
-        # 调用阿里智能体进行去重
-        dedup_result = get_deduplicated_news_ids(news_data)
-        if not dedup_result:
-            logger.error("调用智能体失败，无法完成去重")
+        # 将所有批次的结果累积起来
+        all_selected_news = []
+        all_duplicate_groups = []
+        total_input_count = 0
+        total_kept_count = 0
+        total_duplicate_count = 0
+        
+        # 分批处理
+        total_batches = (total_news + batch_size - 1) // batch_size  # 向上取整
+        for batch_index in range(total_batches):
+            start_idx = batch_index * batch_size
+            end_idx = min(start_idx + batch_size, total_news)
+            batch_data = news_data[start_idx:end_idx]
+            
+            batch_num = batch_index + 1
+            logger.info(f"处理第 {batch_num}/{total_batches} 批，包含 {len(batch_data)} 条新闻")
+            
+            # 调用阿里智能体进行去重
+            dedup_result = get_deduplicated_news_ids(batch_data)
+            if not dedup_result:
+                logger.error(f"第 {batch_num} 批调用智能体失败，跳过该批次")
+                continue
+            
+            # 累积结果
+            if 'selected_news' in dedup_result:
+                all_selected_news.extend(dedup_result['selected_news'])
+                total_kept_count += len(dedup_result['selected_news'])
+            
+            if 'duplicate_groups' in dedup_result:
+                all_duplicate_groups.extend(dedup_result['duplicate_groups'])
+                total_duplicate_count += len(dedup_result['duplicate_groups'])
+            
+            total_input_count += len(batch_data)
+            
+            # 批次间短暂暂停，避免API请求过于频繁
+            if batch_num < total_batches:
+                time.sleep(1)
+        
+        # 所有批次处理完成后，合并结果并保存
+        if not all_selected_news:
+            logger.error("所有批次处理完成，但没有保留任何新闻")
             return False
         
-        # 将结果保存到PostgreSQL
-        success = save_to_postgres(dedup_result, workflow_id)
+        # 合并所有批次的结果
+        merged_result = {
+            'selected_news': all_selected_news,
+            'duplicate_groups': all_duplicate_groups,
+            'summary': {
+                'total_input': total_input_count,
+                'unique_kept': len(all_selected_news),
+                'duplicate_found': total_duplicate_count
+            }
+        }
+        
+        logger.info(f"所有批次处理完成，总计输入{total_input_count}条，保留{len(all_selected_news)}条，发现{total_duplicate_count}组重复")
+        
+        # 将合并后的结果保存到PostgreSQL
+        success = save_to_postgres(merged_result, workflow_id)
         if success:
             logger.info(f"成功将去重结果保存到PostgreSQL，workflow_id: {workflow_id}")
         

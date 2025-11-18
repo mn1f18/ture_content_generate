@@ -603,12 +603,15 @@ def process_single_article(article_data):
             return False
         
         # 保存结果到数据库
-        success = save_to_true_content(zh_result, en_result, article_data['workflow_id'])
-        if success:
+        # 分别保存中文和英文结果
+        zh_success = save_to_true_content(zh_result, article_data, is_english=False)
+        en_success = save_to_true_content(en_result, article_data, is_english=True)
+        
+        if zh_success and en_success:
             logger.info(f"成功处理并保存文章 link_id: {link_id}")
             return True
         else:
-            logger.error(f"保存结果到数据库失败，link_id: {link_id}")
+            logger.error(f"保存结果到数据库失败，link_id: {link_id}，中文: {zh_success}，英文: {en_success}")
             return False
             
     except Exception as e:
