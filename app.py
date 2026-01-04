@@ -729,8 +729,14 @@ def monitoring_thread():
                         logger.info(f"更新最后处理的workflow_id为: {current_workflow_id}")
                     else:
                         logger.error(f"处理workflow_id: {current_workflow_id} 失败")
+                        # 处理失败时也标记为已处理，避免无限循环
+                        monitor_state['last_processed_workflow_id'] = current_workflow_id
+                        logger.info(f"处理失败，仍标记workflow_id为已处理以避免重复: {current_workflow_id}")
                 except Exception as e:
                     logger.error(f"处理workflow时出错: {str(e)}")
+                    # 异常时也标记为已处理，避免无限循环
+                    monitor_state['last_processed_workflow_id'] = current_workflow_id
+                    logger.info(f"处理异常，仍标记workflow_id为已处理以避免重复: {current_workflow_id}")
                 
                 # 重置倒计时
                 countdown_start = None

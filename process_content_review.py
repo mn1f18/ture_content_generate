@@ -194,75 +194,98 @@ def get_original_content(link_id, max_retries=3):
     logger.error(f"获取link_id为{link_id}的原始内容失败，已达到最大重试次数")
     return None
 
-def call_ali_agent(original_content, is_english=False):
+def call_ali_agent(original_content, is_english=False, max_retries=2, timeout=60):
     """调用阿里智能体进行内容审核和优化
     
     Args:
         original_content: 原始内容 
         is_english: 是否调用英文版智能体
+        max_retries: 最大重试次数（默认2次，即首次+1次重试）
+        timeout: 超时时间（秒），默认60秒
         
     Returns:
         dict: 审核结果
     """
-    try:
-        # 根据是否是英文选择不同的应用ID
-        app_id = ALI_AGENT_CONTENT_EN_APP_ID if is_english else ALI_AGENT_CONTENT_APP_ID
-        
-        if not DASHSCOPE_API_KEY or not app_id:
-            logger.error(f"阿里智能体API密钥或应用ID未配置，无法处理{'英文' if is_english else '中文'}内容")
-            return None
-        
-        # 准备输入数据 - 处理日期类型
-        # 深拷贝原始内容，避免修改原始数据
-        processed_content = {}
-        for key, value in original_content.items():
-            # 正确检查日期类型
-            if hasattr(value, 'isoformat') and callable(getattr(value, 'isoformat')):
-                processed_content[key] = value.isoformat()
-            else:
-                processed_content[key] = value
-        
-        # 准备输入数据
-        input_text = json.dumps(processed_content, ensure_ascii=False, default=str)
-        
-        # 使用Application.call方法，与test_simple.py保持一致
-        response = Application.call(
-            api_key=DASHSCOPE_API_KEY,
-            app_id=app_id,
-            prompt=input_text
-        )
-        
-        if response.status_code == HTTPStatus.OK:
-            result = response.output.text
-        else:
-            logger.error(f"调用阿里智能体失败: {response.message}")
-            return None
-        
-        # 提取JSON结果
-        try:
-            if isinstance(result, str):
-                # 尝试直接解析
-                try:
-                    return json.loads(result)
-                except json.JSONDecodeError:
-                    # 尝试提取JSON部分
-                    logger.debug(f"尝试从结果中提取JSON: {result[:200]}...")
-                    json_match = extract_json_from_text(result)
-                    if json_match:
-                        return json.loads(json_match)
-                    else:
-                        logger.error("无法从结果中提取JSON")
-                        return None
-            else:
-                # 已经是JSON对象
-                return result
-        except Exception as e:
-            logger.error(f"解析阿里智能体响应时出错: {str(e)}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"调用阿里智能体时出错: {str(e)}")
+    # 根据是否是英文选择不同的应用ID
+    app_id = ALI_AGENT_CONTENT_EN_APP_ID if is_english else ALI_AGENT_CONTENT_APP_ID
+    lang_type = '英文' if is_english else '中文'
+    
+    if not DASHSCOPE_API_KEY or not app_id:
+        logger.error(f"阿里智能体API密钥或应用ID未配置，无法处理{lang_type}内容")
         return None
+    
+    # 准备输入数据 - 处理日期类型
+    # 深拷贝原始内容，避免修改原始数据
+    processed_content = {}
+    for key, value in original_content.items():
+        # 正确检查日期类型
+        if hasattr(value, 'isoformat') and callable(getattr(value, 'isoformat')):
+            processed_content[key] = value.isoformat()
+        else:
+            processed_content[key] = value
+    
+    # 准备输入数据
+    input_text = json.dumps(processed_content, ensure_ascii=False, default=str)
+    
+    # 重试逻辑
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                logger.info(f"第{attempt + 1}次尝试调用{lang_type}智能体...")
+            
+            # 使用Application.call方法，设置超时时间
+            response = Application.call(
+                api_key=DASHSCOPE_API_KEY,
+                app_id=app_id,
+                prompt=input_text,
+                timeout=timeout
+            )
+            
+            if response.status_code == HTTPStatus.OK:
+                result = response.output.text
+            else:
+                logger.error(f"调用阿里智能体失败: {response.message}")
+                if attempt < max_retries - 1:
+                    logger.info(f"将在1秒后重试...")
+                    time.sleep(1)
+                    continue
+                return None
+            
+            # 提取JSON结果
+            try:
+                if isinstance(result, str):
+                    # 尝试直接解析
+                    try:
+                        return json.loads(result)
+                    except json.JSONDecodeError:
+                        # 尝试提取JSON部分
+                        logger.debug(f"尝试从结果中提取JSON: {result[:200]}...")
+                        json_match = extract_json_from_text(result)
+                        if json_match:
+                            return json.loads(json_match)
+                        else:
+                            logger.error("无法从结果中提取JSON")
+                            return None
+                else:
+                    # 已经是JSON对象
+                    return result
+            except Exception as e:
+                logger.error(f"解析阿里智能体响应时出错: {str(e)}")
+                return None
+                
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"调用阿里智能体时出错 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
+            
+            # 如果还有重试机会，等待后重试
+            if attempt < max_retries - 1:
+                logger.info(f"将在1秒后重试...")
+                time.sleep(1)
+            else:
+                logger.error(f"调用{lang_type}智能体失败，已达到最大重试次数")
+                return None
+    
+    return None
 
 def extract_json_from_text(text):
     """从文本中提取JSON内容，支持处理带有Markdown代码块格式的JSON"""
