@@ -238,7 +238,7 @@ def call_ali_agent(original_content, is_english=False, max_retries=2, timeout=60
                 api_key=DASHSCOPE_API_KEY,
                 app_id=app_id,
                 prompt=input_text,
-                timeout=timeout
+                request_timeout=timeout
             )
             
             if response.status_code == HTTPStatus.OK:
