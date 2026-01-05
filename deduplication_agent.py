@@ -159,11 +159,13 @@ def extract_json_from_text(text):
     logger.warning(f"无法从文本中提取有效的JSON: {text[:200]}...")
     return None
 
-def get_deduplicated_news_ids(news_list):
+def get_deduplicated_news_ids(news_list, max_retries=3, timeout=120):
     """调用阿里去重智能体获取去重结果
     
     Args:
         news_list: 原始新闻列表
+        max_retries: 最大重试次数（默认3次）
+        timeout: 超时时间（秒），默认120秒
         
     Returns:
         dict: 完整的去重结果，包含selected_news和duplicate_groups
@@ -175,34 +177,58 @@ def get_deduplicated_news_ids(news_list):
     
     logger.info(f"调用阿里智能体进行新闻去重，共 {len(news_list)} 条")
     
-    try:
-        # 使用新版API调用方式，与test_simple.py保持一致
-        response = Application.call(
-            api_key=DASHSCOPE_API_KEY,
-            app_id=ALI_AGENT_APP_ID,
-            prompt=json.dumps(input_data, ensure_ascii=False)
-        )
-        
-        if response.status_code == HTTPStatus.OK:
-            result = response.output.text
-        else:
-            logger.error(f"调用阿里智能体失败: {response.message}")
-            return None
-        
-        # 提取完整JSON结果
-        dedup_result = extract_selected_news(result)
-        
-        if dedup_result and 'selected_news' in dedup_result:
-            selected_count = len(dedup_result['selected_news'])
-            logger.info(f"阿里智能体去重完成，保留 {selected_count} 条")
-            return dedup_result
-        else:
-            logger.error("智能体返回的结果格式不正确")
-            return None
-        
-    except Exception as e:
-        logger.error(f"调用阿里智能体过程中发生错误: {str(e)}")
-        return None
+    # 重试逻辑
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                logger.info(f"第{attempt + 1}次尝试调用去重智能体...")
+            
+            # 使用新版API调用方式，设置超时时间
+            response = Application.call(
+                api_key=DASHSCOPE_API_KEY,
+                app_id=ALI_AGENT_APP_ID,
+                prompt=json.dumps(input_data, ensure_ascii=False),
+                request_timeout=timeout
+            )
+            
+            if response.status_code == HTTPStatus.OK:
+                result = response.output.text
+            else:
+                logger.error(f"调用阿里智能体失败: {response.message}")
+                if attempt < max_retries - 1:
+                    logger.info(f"将在2秒后重试...")
+                    time.sleep(2)
+                    continue
+                return None
+            
+            # 提取完整JSON结果
+            dedup_result = extract_selected_news(result)
+            
+            if dedup_result and 'selected_news' in dedup_result:
+                selected_count = len(dedup_result['selected_news'])
+                logger.info(f"阿里智能体去重完成，保留 {selected_count} 条")
+                return dedup_result
+            else:
+                logger.error("智能体返回的结果格式不正确")
+                if attempt < max_retries - 1:
+                    logger.info(f"将在2秒后重试...")
+                    time.sleep(2)
+                    continue
+                return None
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"调用阿里智能体时出错 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
+            
+            # 如果还有重试机会，等待后重试
+            if attempt < max_retries - 1:
+                logger.info(f"将在2秒后重试...")
+                time.sleep(2)
+            else:
+                logger.error(f"调用去重智能体失败，已达到最大重试次数")
+                return None
+    
+    return None
 
 def save_to_postgres(dedup_result, workflow_id):
     """将去重结果保存到PostgreSQL数据库"""
