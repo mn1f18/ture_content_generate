@@ -605,7 +605,8 @@ def process_single_article(article_data):
                 "event_tags": article_data["event_tags"],
                 "space_tags": article_data["space_tags"],
                 "cat_tags": article_data["cat_tags"],
-                "impact_factors": article_data["impact_factors"]
+                "impact_factors": article_data["impact_factors"],
+                "homepage_url": article_data.get("homepage_url", "")
             }
         }
         
